@@ -1,0 +1,36 @@
+import setuptools
+
+# Read the contents of your README file
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
+
+setuptools.setup(
+    name="edidio_control_py",
+    version="0.0.1",
+    author="Michael Howes",
+    author_email="michael@creativelighting.com.au",
+    description="Python library for controlling the Control Freak eDIDIO S10 device.",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    url="https://github.com/your_github_username/edidio_control_plugin",
+    packages=setuptools.find_packages(),
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+        "Intended Audience :: Developers",
+        "Topic :: Home Automation",
+        "Topic :: Software Development :: Libraries :: Python Modules",
+        "Framework :: AsyncIO",  # Since your client uses asyncio
+    ],
+    python_requires=">=3.9",  # Specify the minimum Python version required
+    install_requires=[
+        # List any external libraries your plugin depends on here.
+        # Based on your code, you will need google's protobuf library:
+        "protobuf>=3.0"
+    ],
+)
