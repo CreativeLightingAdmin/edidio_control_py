@@ -12,7 +12,7 @@ setuptools.setup(
     description="Python library for controlling the Control Freak eDIDIO S10 device.",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/your_github_username/edidio_control_plugin",
+    url="https://github.com/CreativeLightingAdmin/edidio_control_py",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -25,12 +25,10 @@ setuptools.setup(
         "Intended Audience :: Developers",
         "Topic :: Home Automation",
         "Topic :: Software Development :: Libraries :: Python Modules",
-        "Framework :: AsyncIO",  # Since your client uses asyncio
+        "Framework :: AsyncIO",
     ],
-    python_requires=">=3.9",  # Specify the minimum Python version required
+    python_requires=">=3.9",  
     install_requires=[
-        # List any external libraries your plugin depends on here.
-        # Based on your code, you will need google's protobuf library:
         "protobuf>=3.0"
     ],
 )
