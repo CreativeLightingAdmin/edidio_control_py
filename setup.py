@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="edidio_control_py",
-    version="0.0.1",
+    version="0.1.1",
     author="Michael Howes",
     author_email="michael@creativelighting.com.au",
     description="Python library for controlling the Control Freak eDIDIO S10 device.",
