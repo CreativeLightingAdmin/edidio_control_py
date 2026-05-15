@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edidio_control_py"
+version = "0.2.0"
+authors = [
+    { name = "Michael Howes", email = "michael@creativelighting.com.au" }
+]
+description = "Python library for controlling the Control Freak eDIDIO S10 device."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = [
+    "protobuf>=3.0"
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Topic :: Home Automation",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Framework :: AsyncIO",
+]
+
+[project.urls]
+Homepage = "https://github.com/CreativeLightingAdmin/edidio_control_py"

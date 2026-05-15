@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import logging
+import ssl
 
 from . import eDS10_ProtocolBuffer_pb2 as pb
 from .exceptions import (
@@ -22,23 +23,40 @@ KEEP_ALIVE_MESSAGE = bytes([0xFF, 0xF6])
 class EdidioClient:
     """Client for communicating with the Control Freak eDIDIO device."""
 
-    def __init__(self, host: str, port: int, timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float = 5.0,
+        *,
+        use_tls: bool = False,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
         """Initialize the eDIDIO client.
 
         Args:
-            host (str): The IP address or hostname of the eDIDIO device.
-            port (int): The port number of the eDIDIO device.
-            timeout (float): Default timeout for network operations in seconds.
+            host: The IP address or hostname of the eDIDIO device.
+            port: The port number of the eDIDIO device. Typically 23 for plain
+                TCP or 443 for TLS.
+            timeout: Default timeout for network operations in seconds.
+            use_tls: If True, use TLS for the connection.
+            ssl_context: Optional SSL context for TLS connections. If use_tls is
+                True and this is None, a default SSL context (system CA bundle)
+                is used. To connect to devices with self-signed certificates,
+                pass an SSLContext with check_hostname=False and
+                verify_mode=ssl.CERT_NONE.
 
         """
         self._host = host
         self._port = port
         self._timeout = timeout
+        self._use_tls = use_tls
+        self._ssl_context = ssl_context
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._connected = False
-        self._reconnect_lock = asyncio.Lock()  # For connection attempts
-        self._keep_alive_task: asyncio.Task | None = None  # For the periodic keep-alive
+        self._reconnect_lock = asyncio.Lock()
+        self._keep_alive_task: asyncio.Task | None = None
 
     @property
     def host(self) -> str:
@@ -51,6 +69,11 @@ class EdidioClient:
         return self._port
 
     @property
+    def use_tls(self) -> bool:
+        """Return True if TLS is enabled."""
+        return self._use_tls
+
+    @property
     def connected(self) -> bool:
         """Return True if the client is currently connected and not closing."""
         return (
@@ -59,7 +82,16 @@ class EdidioClient:
             and self._connected
         )
 
-    async def connect(self):
+    async def __aenter__(self) -> "EdidioClient":
+        """Connect on entering the async context manager."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Disconnect on exiting the async context manager."""
+        await self.disconnect()
+
+    async def connect(self) -> None:
         """Establish a connection to the eDIDIO device and start keep-alive."""
         if self.connected:
             return
@@ -68,24 +100,28 @@ class EdidioClient:
             if self.connected:
                 return
 
+            ssl_arg: ssl.SSLContext | bool | None = None
+            if self._use_tls:
+                ssl_arg = self._ssl_context if self._ssl_context is not None else True
+
             _LOGGER.debug(
-                "Attempting to connect to eDIDIO device at %s:%s",
+                "Attempting to connect to eDIDIO device at %s:%s (TLS: %s)",
                 self._host,
                 self._port,
+                self._use_tls,
             )
             try:
                 self._reader, self._writer = await asyncio.wait_for(
-                    asyncio.open_connection(self._host, self._port),
+                    asyncio.open_connection(self._host, self._port, ssl=ssl_arg),
                     timeout=self._timeout,
                 )
-                self._connected = True  # Set internal flag after successful connection
+                self._connected = True
                 _LOGGER.info(
                     "Successfully connected to eDIDIO device at %s:%s",
                     self._host,
                     self._port,
                 )
 
-                # Start the keep-alive task only if not already running
                 if not self._keep_alive_task or self._keep_alive_task.done():
                     self._keep_alive_task = asyncio.create_task(self._keep_alive())
                     _LOGGER.debug(
@@ -96,6 +132,10 @@ class EdidioClient:
                 self._connected = False
                 _LOGGER.error("Connection to eDIDIO device timed out: %s", e)
                 raise EDIDIOTimeoutError(f"Connection timed out: {e}") from e
+            except ssl.SSLError as e:
+                self._connected = False
+                _LOGGER.error("TLS error connecting to eDIDIO device: %s", e)
+                raise EDIDIOConnectionError(f"TLS error: {e}") from e
             except (OSError, ConnectionRefusedError) as e:
                 self._connected = False
                 _LOGGER.error("Failed to connect to eDIDIO device: %s", e)
@@ -105,7 +145,7 @@ class EdidioClient:
                 _LOGGER.error("An unexpected error occurred during connection: %s", e)
                 raise EDIDIOConnectionError(f"Unexpected connection error: {e}") from e
 
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         """Close the connection to the eDIDIO device and stop keep-alive."""
         if self._keep_alive_task:
             self._keep_alive_task.cancel()
@@ -119,7 +159,6 @@ class EdidioClient:
                 "Closing connection to eDIDIO device %s:%s", self._host, self._port
             )
             self._writer.close()
-            # Await wait_closed to ensure the underlying socket is truly closed
             with contextlib.suppress(ConnectionResetError, asyncio.TimeoutError):
                 await asyncio.wait_for(
                     self._writer.wait_closed(), timeout=self._timeout
@@ -130,38 +169,21 @@ class EdidioClient:
         self._connected = False
         _LOGGER.info("Disconnected from eDIDIO device %s:%s", self._host, self._port)
 
-    async def _send_raw_bytes(self, message: bytes):
+    async def _send_raw_bytes(self, message: bytes) -> None:
         """Send raw bytes over the TCP connection."""
-
-        def _raise_connection_error(
-            message: str, original_exception: Exception | None = None
-        ):
-            """Raise an EDIDIOConnectionError with the given message."""
-            _LOGGER.error("Connection error: %s", message)
-            if original_exception:
-                raise EDIDIOConnectionError(message) from original_exception
-            raise EDIDIOConnectionError(message)
-
-        def _raise_communication_error(
-            message: str, original_exception: Exception | None = None
-        ):
-            """Raise an EDIDIOCommunicationError with the given message."""
-            _LOGGER.error("Communication error: %s", message)
-            if original_exception:
-                raise EDIDIOCommunicationError(message) from original_exception
-            raise EDIDIOCommunicationError(message)
-
         if not self.connected:
             _LOGGER.warning(
                 "Attempted to send message while not connected. Reconnecting"
             )
             try:
-                await self.connect()  # Attempt to reconnect
-                if not self.connected:  # If reconnection failed
-                    _raise_connection_error("Not connected to eDIDIO device.")
+                await self.connect()
+                if not self.connected:
+                    raise EDIDIOConnectionError("Not connected to eDIDIO device.")
             except EDIDIOConnectionError as e:
                 _LOGGER.error("Failed to reconnect before sending message: %s", e)
-                raise  # Re-raise the connection error, allowing the outer try/except (if any) to catch it
+                raise
+
+        assert self._writer is not None  # guaranteed by connected check above
 
         try:
             self._writer.write(message)
@@ -169,41 +191,24 @@ class EdidioClient:
             _LOGGER.debug("Sent raw bytes: %s", message.hex())
         except TimeoutError as e:
             _LOGGER.error("Timeout during raw byte send: %s", e)
-            self._connected = False  # Connection might be bad
+            self._connected = False
             raise EDIDIOTimeoutError(f"Send operation timed out: {e}") from e
         except (OSError, ConnectionResetError) as e:
-            self._connected = False  # Mark as disconnected on error
-            _raise_communication_error(
-                f"Socket error during raw byte send, marking as disconnected: {e}", e
+            self._connected = False
+            _LOGGER.error(
+                "Socket error during raw byte send, marking as disconnected: %s", e
             )
+            raise EDIDIOCommunicationError(
+                f"Socket error during raw byte send: {e}"
+            ) from e
         except Exception as e:
             if isinstance(e, (asyncio.CancelledError, KeyboardInterrupt)):
                 raise
-            _raise_communication_error(f"Unexpected send error: {e}", e)
+            _LOGGER.error("Unexpected send error: %s", e)
+            raise EDIDIOCommunicationError(f"Unexpected send error: {e}") from e
 
-    async def _receive_raw_bytes(
-        self, num_bytes: int = 100
-    ) -> bytes:  # Default to 100 for general reads
+    async def _receive_raw_bytes(self, num_bytes: int = 100) -> bytes:
         """Receive raw bytes from the TCP connection."""
-
-        def _raise_connection_error(
-            message: str, original_exception: Exception | None = None
-        ):
-            """Raise an EDIDIOConnectionError with the given message."""
-            _LOGGER.error("Connection error: %s", message)
-            if original_exception:
-                raise EDIDIOConnectionError(message) from original_exception
-            raise EDIDIOConnectionError(message)
-
-        def _raise_communication_error(
-            message: str, original_exception: Exception | None = None
-        ):
-            """Raise an EDIDIOCommunicationError with the given message."""
-            _LOGGER.error("Communication error: %s", message)
-            if original_exception:
-                raise EDIDIOCommunicationError(message) from original_exception
-            raise EDIDIOCommunicationError(message)
-
         if not self.connected:
             _LOGGER.warning(
                 "Attempt to receive message while not connected. Reconnecting"
@@ -211,39 +216,42 @@ class EdidioClient:
             try:
                 await self.connect()
                 if not self.connected:
-                    _raise_connection_error(
+                    raise EDIDIOConnectionError(
                         "Not connected to eDIDIO device for receiving."
                     )
             except EDIDIOConnectionError as e:
                 _LOGGER.error("Failed to reconnect before receive: %s", e)
-                raise ConnectionError("Not connected and reconnect failed.") from e
+                raise
+
+        assert self._reader is not None  # guaranteed by connected check above
 
         try:
             data = await asyncio.wait_for(
                 self._reader.read(num_bytes), timeout=self._timeout
             )
+            _LOGGER.debug("Received raw bytes: %s", data.hex())
+            return data
         except TimeoutError as e:
             _LOGGER.error("Timeout during raw byte receive: %s", e)
             raise EDIDIOTimeoutError(f"Receive operation timed out: {e}") from e
         except asyncio.IncompleteReadError as e:
             self._connected = False
-            _raise_communication_error(f"Incomplete read, connection lost: {e}", e)
+            _LOGGER.error("Incomplete read, connection lost: %s", e)
+            raise EDIDIOCommunicationError(f"Incomplete read, connection lost: {e}") from e
         except (OSError, ConnectionResetError) as e:
             self._connected = False
-            _raise_communication_error(f"Failed to receive raw bytes: {e}", e)
+            _LOGGER.error("Failed to receive raw bytes: %s", e)
+            raise EDIDIOCommunicationError(f"Failed to receive raw bytes: {e}") from e
         except Exception as e:
             if isinstance(e, (asyncio.CancelledError, KeyboardInterrupt)):
                 raise
-            _raise_communication_error(f"Unexpected receive error: {e}", e)
-        else:
-            _LOGGER.debug("Received raw bytes: %s", data.hex())
-            return data
+            _LOGGER.error("Unexpected receive error: %s", e)
+            raise EDIDIOCommunicationError(f"Unexpected receive error: {e}") from e
 
     async def _keep_alive(self) -> None:
         """Send periodic keep-alive messages."""
-        while self.connected:  # Continue as long as connected
+        while self.connected:
             try:
-                # Use the internal _send_raw_bytes, not the public send_raw_message
                 await self._send_raw_bytes(KEEP_ALIVE_MESSAGE)
             except (
                 EDIDIOConnectionError,
@@ -256,7 +264,6 @@ class EdidioClient:
                     self._port,
                     e,
                 )
-                # If keep-alive fails, the main send/receive will try to reconnect
             except asyncio.CancelledError:
                 _LOGGER.debug(
                     "Keep-alive task for %s:%s cancelled", self._host, self._port
@@ -275,21 +282,16 @@ class EdidioClient:
             await asyncio.sleep(KEEP_ALIVE_INTERVAL_SECONDS)
         _LOGGER.debug("Keep-alive task for %s:%s stopped", self._host, self._port)
 
-    async def send_protobuf_message(self, message: bytes):
+    async def send_protobuf_message(self, message: bytes) -> None:
         """Send a protobuf message to the eDIDIO device."""
-        # This calls the internal _send_raw_bytes
         await self._send_raw_bytes(message)
 
     async def receive_protobuf_response(self) -> bytes:
         """Receive a protobuf response from the eDIDIO device."""
-
-        def _raise_invalid_message_error(message: str):
-            """Raise an EDIDIOInvalidMessageError with the given message."""
-            raise EDIDIOInvalidMessageError(message)
-
-        # This logic is specific to the eDIDIO protobuf framing
         if not self.connected:
             raise EDIDIOConnectionError("Not connected to eDIDIO device for receiving.")
+
+        assert self._reader is not None  # guaranteed by connected check above
 
         try:
             # Read header (0xCD and 2-byte length)
@@ -297,11 +299,13 @@ class EdidioClient:
                 self._reader.readexactly(3), timeout=self._timeout
             )
             if header[0] != 0xCD:
-                _raise_invalid_message_error("Invalid message header. Expected 0xCD.")
+                raise EDIDIOInvalidMessageError(
+                    "Invalid message header. Expected 0xCD."
+                )
 
             length = (header[1] << 8) | header[2]
             if length <= 0:
-                _raise_invalid_message_error(
+                raise EDIDIOInvalidMessageError(
                     f"Invalid message length received: {length}"
                 )
 
@@ -335,9 +339,9 @@ class EdidioClient:
             raise EDIDIOCommunicationError(
                 f"Unexpected protobuf receive error: {e}"
             ) from e
-        else:
-            _LOGGER.debug("Received protobuf payload: %s", payload.hex())
-            return payload
+
+        _LOGGER.debug("Received protobuf payload: %s", payload.hex())
+        return payload
 
     # --- Message Creation Helper Methods ---
     @staticmethod
@@ -460,7 +464,7 @@ class EdidioClient:
         channel: int,
         level: list[int],
         fade_time_by_10ms: int = 0,
-    ):
+    ) -> None:
         """Send a DMX level command."""
         msg = self.create_dmx_message(
             message_id, zone, universe_mask, channel, 1, level, fade_time_by_10ms
@@ -469,7 +473,7 @@ class EdidioClient:
 
     async def set_dali_arc_level(
         self, message_id: int, line_mask: int, address: int, arc_level: int
-    ):
+    ) -> None:
         """Send a DALI ARC_LEVEL command."""
         safe_arc_level = min(max(0, arc_level), DALI_ARC_LEVEL_MAX)
         msg = self.create_dali_message(
@@ -481,7 +485,7 @@ class EdidioClient:
         )
         await self.send_protobuf_message(msg)
 
-    async def send_dali_commands_sequence(self, commands: list[bytes]):
+    async def send_dali_commands_sequence(self, commands: list[bytes]) -> None:
         """Send a sequence of raw DALI protobuf messages."""
         for cmd in commands:
             await self.send_protobuf_message(cmd)
