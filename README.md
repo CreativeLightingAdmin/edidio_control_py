@@ -6,6 +6,13 @@ A Python library for communicating with and controlling the Control Freak eDIDIO
 
 - Asynchronous TCP and TLS communication with eDIDIO controllers
 - Support for DMX and DALI (including DALI DT8 CCT) message creation
+- High-level helpers for DALI group levels, standard commands, and scene recall
+- SpektraPlus control (start/stop/pause sequences, themes, and static scenes)
+- **Authoring (0.4.0):** create/save SpektraPlus sequences and themes, and
+  schedules/alarms (`create_spektra_sequence_message`,
+  `create_spektra_theme_message`, `create_alarm_message`), plus read/query
+  builders (`create_spektra_read_message`, `create_read_device_message`,
+  `create_diagnostic_message`) and a `request()` helper that decodes the reply
 - Connection management including keep-alive and auto-reconnect
 - Async context manager support
 
@@ -95,6 +102,24 @@ Sets a DALI device brightness. `arc_level` is clamped to `0–254`.
 #### `await client.set_dmx_level(message_id, zone, universe_mask, channel, level, fade_time_by_10ms=0)`
 Sends a DMX level command. `level` is a list of channel values.
 
+#### `await client.set_dali_group_arc_level(message_id, line_mask, group, arc_level)`
+Sets a whole DALI group's brightness. `arc_level` is clamped to `0–254`.
+
+#### `await client.send_dali_command(message_id, line_mask, address, command, arg=0)`
+Sends a standard DALI command to an address. `command` is a `DALICommandType` value (e.g. `DALICommandType.DALI_OFF`, `DALI_MAX_LEVEL`, `DALI_FADE_UP`); `arg` carries a command argument where applicable.
+
+#### `await client.recall_dali_scene(message_id, line_mask, scene)`
+Recalls a stored DALI scene across all fittings on the given line(s).
+
+#### `await client.recall_dali_scene_on_group(message_id, line_mask, group, scene)`
+Recalls a stored DALI scene on a specific group.
+
+#### `await client.send_spektra_control(message_id, spektra_type, zone, index, action)`
+Starts/stops/pauses a SpektraPlus sequence, theme, or static scene on a zone. `spektra_type` is a `SpektraTargetType` value (`SEQUENCE`, `THEME`, `STATIC`); `action` is a `SpektraActionType` value (`START`, `STOP`, `PAUSE`).
+
+#### `await client.send_spektra_stop(message_id, zone, line_mask=0xFF)`
+Stops SpektraPlus playback on a zone **and** turns the output off (matching how the SpektraPlus app stops playback).
+
 #### `await client.send_dali_commands_sequence(commands)`
 Sends a list of pre-built DALI protobuf byte messages with a 50ms gap between each.
 
@@ -109,6 +134,28 @@ Static method. Builds and frames a DALI protobuf message. Exactly one action fie
 
 #### `EdidioClient.create_dmx_message(message_id, zone, universe_mask, channel, repeat, level, fade_time_by_10ms=0)`
 Static method. Builds and frames a DMX protobuf message.
+
+#### `EdidioClient.create_spektra_control_message(message_id, spektra_type, zone, index, action)`
+Static method. Builds and frames a SpektraPlus control message.
+
+#### `EdidioClient.create_spektra_stop_message(message_id, zone, line_mask=0xFF)`
+Static method. Builds and frames a SpektraPlus stop external-trigger message.
+
+### Enums
+
+For convenience the protocol enums are re-exported from the package, so you don't need to reach into the generated protobuf module:
+
+```python
+from edidio_control_py import (
+    DALICommandType,
+    CustomDALICommandType,
+    SpektraTargetType,
+    SpektraActionType,
+)
+
+await client.send_dali_command(1, line_mask=1, address=0, command=DALICommandType.DALI_MAX_LEVEL)
+await client.send_spektra_control(2, SpektraTargetType.SEQUENCE, zone=1, index=0, action=SpektraActionType.START)
+```
 
 ### Properties
 
