@@ -102,7 +102,9 @@ class EdidioClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._connected = False
-        self._reconnect_lock = asyncio.Lock()
+        # Created on first use inside the running loop: on Python 3.9 asyncio.Lock()
+        # binds to a loop at construction, which breaks clients built outside one.
+        self._reconnect_lock: asyncio.Lock | None = None
         self._keep_alive_task: asyncio.Task | None = None
 
     @property
@@ -143,6 +145,8 @@ class EdidioClient:
         if self.connected:
             return
 
+        if self._reconnect_lock is None:
+            self._reconnect_lock = asyncio.Lock()
         async with self._reconnect_lock:
             if self.connected:
                 return

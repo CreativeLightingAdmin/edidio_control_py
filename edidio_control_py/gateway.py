@@ -67,7 +67,9 @@ class EdidioDispatcher:
                  event_categories=("dali", "inputs", "sensors", "triggers"),
                  groups: dict | None = None, event_stream: EventStream | None = None):
         self._client = client or EdidioClient(host, port, timeout=timeout, use_tls=use_tls)
-        self._queue: asyncio.Queue[dict] = asyncio.Queue()
+        # Created in start() inside the running loop (Python 3.9 binds queues at
+        # construction); submit() refuses intents until then.
+        self._queue: asyncio.Queue[dict] | None = None
         self._worker: asyncio.Task | None = None
         self._message_id = 0
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -86,6 +88,7 @@ class EdidioDispatcher:
 
     async def start(self) -> None:
         """Connect (best-effort), start the worker and, if requested, the event feed."""
+        self._queue = asyncio.Queue()
         self._loop = asyncio.get_running_loop()
         try:
             await self._client.connect()

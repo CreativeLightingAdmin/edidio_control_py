@@ -260,3 +260,24 @@ def test_connect_timeout_is_edidio_timeout_error(monkeypatch):
             await EdidioClient("10.0.0.1", 23, timeout=0.05).connect()
 
     asyncio.run(run())
+
+
+def test_no_loop_bound_objects_created_outside_a_loop():
+    # Python 3.9 binds asyncio.Lock/Queue to a loop at construction, so building
+    # a client or dispatcher outside a running loop (after an earlier
+    # asyncio.run) raised "There is no current event loop". Create them lazily.
+    from edidio_control_py import EdidioClient
+
+    asyncio.run(asyncio.sleep(0))                 # leave no current loop behind
+    client = EdidioClient("10.0.0.1", 23)
+    d = EdidioDispatcher("x", client=RecordingClient())
+    assert client._reconnect_lock is None and d._queue is None
+
+    async def run():
+        await d.start()
+        d.submit({"kind": "dali_level", "line": 1, "address": 1, "level": 1})
+        await asyncio.sleep(0.01)
+        await d.stop()
+
+    asyncio.run(run())
+    assert d._client.calls[0][0] == "set_dali_arc_level"
