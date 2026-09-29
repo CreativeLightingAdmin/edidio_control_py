@@ -1,5 +1,7 @@
 """Module for Python Integration of eDIDIO S10 Controller."""
 
+from __future__ import annotations  # PEP 604 annotations (X | None) on Python 3.9
+
 import asyncio
 import contextlib
 import logging

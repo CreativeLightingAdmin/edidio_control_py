@@ -1,0 +1,121 @@
+# CI for edidio_control_py.
+#
+#   tests       - the unit tests on every supported Python (3.9-3.13) on Linux,
+#                 plus Windows (asyncio/TCP timeout behaviour differs there; the
+#                 asyncio.TimeoutError bug fixed in 0.5.0 only showed on <3.11).
+#   package     - build sdist + wheel, check the wheel ships every module and the
+#                 v2 .proto, validate metadata, and smoke-import the built wheel.
+#   downstream  - run eDIDIO-Integrations' Python suites against *this* engine
+#                 commit, so a change that breaks a gateway fails here, before
+#                 it is released.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (py${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        include:
+          - { os: windows-latest, python: "3.10" }
+          - { os: windows-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+      - name: Test
+        run: python -m pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - name: Check wheel contents
+        run: |
+          python - <<'EOF'
+          import glob, zipfile
+          names = set(zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist())
+          required = [
+              "edidio_control_py/__init__.py",
+              "edidio_control_py/eDS10_ProtocolBuffer_pb2.py",
+              "edidio_control_py/events.py",
+              "edidio_control_py/state.py",
+              "edidio_control_py/gateway.py",
+              "edidio_control_py/_v2/__init__.py",
+              "edidio_control_py/_v2/eDS10_v2_pb2.py",
+              "edidio_control_py/_v2/eDS10_v2.proto",
+          ]
+          missing = [n for n in required if n not in names]
+          assert not missing, f"wheel is missing: {missing}"
+          assert not any(n.startswith("tests/") for n in names), "tests leaked into the wheel"
+          print("wheel contents OK")
+          EOF
+      - name: Smoke-import the built wheel
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install -q dist/*.whl
+          cd /tmp && /tmp/smoke/bin/python -c "import edidio_control_py, edidio_control_py.gateway, edidio_control_py.state, edidio_control_py.events; print('import OK', edidio_control_py.__file__)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  downstream:
+    name: downstream (eDIDIO-Integrations)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: edidio_control_py
+      - uses: actions/checkout@v4
+        with:
+          repository: CreativeLightingAdmin/eDIDIO-Integrations
+          path: eDIDIO-Integrations
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install this engine + gateway test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./edidio_control_py
+          python -m pip install pytest PyYAML "HAP-python>=5.0" "xknx>=3.0" "paho-mqtt>=2.0" \
+            "pymodbus==3.8.6" "python-osc>=1.8" "mido>=1.3" "mcp>=2.0"
+      - name: Run engine-dependent suites
+        working-directory: eDIDIO-Integrations
+        run: |
+          status=0
+          for d in "Ambient Data" "CS2 GSI" "Dota 2 GSI" "GTA5" "GenAI Moods" "HomeKit Bridge" \
+                   "KNX Gateway" "Kerbal Space Program" "MCP Server" "MIDI Bridge" "MQTT Bridge" \
+                   "Modbus TCPRTUGateway" "OSC Bridge" "Spektra AI" "Prometheus Exporter"; do
+            [ -d "$d" ] || { echo "::notice::skip $d (not in this revision)"; continue; }
+            echo "::group::$d"
+            ( cd "$d" && python -m pytest -q ) || { echo "::error::$d failed"; status=1; }
+            echo "::endgroup::"
+          done
+          exit $status
