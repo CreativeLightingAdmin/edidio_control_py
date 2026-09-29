@@ -173,10 +173,11 @@ class EdidioClient:
                         "Started keep-alive task for %s:%s", self._host, self._port
                     )
 
-            except TimeoutError as e:
+            except (TimeoutError, asyncio.TimeoutError) as e:  # distinct classes before 3.11
                 self._connected = False
-                _LOGGER.error("Connection to eDIDIO device timed out: %s", e)
-                raise EDIDIOTimeoutError(f"Connection timed out: {e}") from e
+                detail = f"{self._host}:{self._port} after {self._timeout}s"
+                _LOGGER.error("Connection to eDIDIO device timed out (%s)", detail)
+                raise EDIDIOTimeoutError(f"Connection timed out ({detail})") from e
             except ssl.SSLError as e:
                 self._connected = False
                 _LOGGER.error("TLS error connecting to eDIDIO device: %s", e)
@@ -234,7 +235,7 @@ class EdidioClient:
             self._writer.write(message)
             await asyncio.wait_for(self._writer.drain(), timeout=self._timeout)
             _LOGGER.debug("Sent raw bytes: %s", message.hex())
-        except TimeoutError as e:
+        except (TimeoutError, asyncio.TimeoutError) as e:  # distinct classes before 3.11
             _LOGGER.error("Timeout during raw byte send: %s", e)
             self._connected = False
             raise EDIDIOTimeoutError(f"Send operation timed out: {e}") from e
@@ -276,7 +277,7 @@ class EdidioClient:
             )
             _LOGGER.debug("Received raw bytes: %s", data.hex())
             return data
-        except TimeoutError as e:
+        except (TimeoutError, asyncio.TimeoutError) as e:  # distinct classes before 3.11
             _LOGGER.error("Timeout during raw byte receive: %s", e)
             raise EDIDIOTimeoutError(f"Receive operation timed out: {e}") from e
         except asyncio.IncompleteReadError as e:
@@ -359,7 +360,7 @@ class EdidioClient:
                 self._reader.readexactly(length), timeout=self._timeout
             )
 
-        except TimeoutError as e:
+        except (TimeoutError, asyncio.TimeoutError) as e:  # distinct classes before 3.11
             _LOGGER.error("Timeout during protobuf receive: %s", e)
             raise EDIDIOTimeoutError(f"Receive operation timed out: {e}") from e
         except asyncio.IncompleteReadError as e:
@@ -898,7 +899,7 @@ class EdidioClient:
             return await asyncio.wait_for(
                 self._reader.readexactly(length), timeout=self._timeout
             )
-        except TimeoutError as e:
+        except (TimeoutError, asyncio.TimeoutError) as e:  # distinct classes before 3.11
             raise EDIDIOTimeoutError(f"Receive operation timed out: {e}") from e
         except asyncio.IncompleteReadError as e:
             self._connected = False

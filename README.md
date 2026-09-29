@@ -13,6 +13,10 @@ A Python library for communicating with and controlling the Control Freak eDIDIO
   `create_spektra_theme_message`, `create_alarm_message`), plus read/query
   builders (`create_spektra_read_message`, `create_read_device_message`,
   `create_diagnostic_message`) and a `request()` helper that decodes the reply
+- **Live events + state (0.5.0):** subscribe to the controller's pushed event
+  stream (`edidio_control_py.events`), turn DALI bus traffic into light levels
+  (`edidio_control_py.state`), and a shared thread-safe gateway dispatcher with an
+  optional state feed (`edidio_control_py.gateway`)
 - Connection management including keep-alive and auto-reconnect
 - Async context manager support
 
@@ -166,6 +170,77 @@ await client.send_spektra_control(2, SpektraTargetType.SEQUENCE, zone=1, index=0
 | `client.port` | `int` | Port number |
 | `client.use_tls` | `bool` | `True` if TLS is enabled |
 
+## Live events & state (0.5.0)
+
+The controller can **push** events — every DALI frame on the bus, input presses,
+sensor changes, SpektraPlus playback, commands — to a subscribed client. This is
+how integrations report the *real* light state, including changes made by wall
+panels, schedules, SpektraPlus or other apps.
+
+Event Stream v2 needs **firmware ≥ 1.4.0**; older firmware can use the legacy
+`EventMessage` path (`EventStream(..., use_v2=False)`, no DALI-level decoding).
+
+### `EventStream` — a dedicated push connection
+
+```python
+from edidio_control_py.events import EventStream
+
+async def on_event(ev: dict):
+    print(ev["kind"], ev)          # dali / input / sensor / spektra / command / ...
+
+stream = EventStream("192.168.1.50", on_event=on_event)
+await stream.start(["dali", "inputs", "sensors"])
+...
+stream.recent(since_seq=0)          # rolling buffer, for pollers
+await stream.stop()
+```
+
+It uses its own connection (never interferes with request/response), skips idle
+timeouts, and on connection loss **reconnects with backoff and resubscribes**
+(`stream.reconnects`, `stream.connected`).
+
+### `state` — DALI frames → levels
+
+```python
+from edidio_control_py.state import LevelTracker, dali_change
+
+tracker = LevelTracker(groups={(1, 3): [5, 6]})   # optional group membership
+change = dali_change(ev)          # DaliChange(line, address, level, scene, command) or None
+if change:
+    touched = tracker.apply(change)   # [(line, address, level), ...]
+```
+
+Addresses use the eDIDIO convention (0–63 short, `64 + g` group, `80` broadcast);
+lines are 1-based. `level` is `None` when the frame doesn't state one (RECALL MIN,
+GO TO SCENE). Broadcast frames update every known target on the line.
+
+Only frames that really happened count: a TX frame (direction 0) must have status
+`SUCCESS` (0) — ATTEMPT/TIMEOUT/COLLISION etc. are ignored, so a command sent with
+no bus power never shows as a level — and RX frames (direction 1, which use their
+own `frame_type` numbering: 4 = 16-bit) must be successfully received. The
+controller reports its own transmissions twice (TX SUCCESS + RX echo);
+`LevelTracker` drops the repeat. Decoded DALI events carry `ok` and, for TX,
+`status_name`. Verified on firmware 1.6.2.
+
+### `gateway.EdidioDispatcher` — shared by every Python bridge
+
+```python
+from edidio_control_py.gateway import EdidioDispatcher
+
+async def on_state(change, touched):
+    for line, address, level in touched:
+        publish(line, address, level)
+
+d = EdidioDispatcher("192.168.1.50", on_state=on_state)
+await d.start()
+d.submit({"kind": "dali_level", "line": 1, "address": 5, "level": 200})  # any thread
+```
+
+Intents: `dali_level`, `dali_group_level`, `dali_scene`, `dali_command`,
+`spektra`, `spektra_stop`, `dmx_color` (see the module docstring). With
+`on_state`/`on_event` it also runs an `EventStream` and keeps `d.levels` current;
+if the stream can't start, commands still work.
+
 ## Exceptions
 
 All exceptions are defined in `edidio_control_py.exceptions`.
@@ -191,7 +266,7 @@ except EDIDIOConnectionError as e:
 ## Requirements
 
 - Python >= 3.9
-- `protobuf >= 3.0`
+- `protobuf >= 5.29.2` (the generated modules check the runtime version at import)
 
 ## License
 

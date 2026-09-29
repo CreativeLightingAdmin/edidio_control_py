@@ -1,0 +1,2779 @@
+// ============================================================================
+// eDIDIO S10 Protocol Buffer Structure
+// Version 1.3.1
+// ============================================================================
+//
+// This protocol defines the message format for communicating with eDIDIO
+// lighting controllers manufactured by Control Freak.
+//
+// CONNECTION:
+//   - Discovery: UDP broadcast on port 30303 (returns JSON with MAC, IP, firmware)
+//   - Control: TCP (port 23) or TLS (port 443)
+//   - Heartbeat: Send AytMessage (0xFF 0xF6) within 20 seconds to maintain connection
+//
+// MESSAGE FRAMING:
+//   All messages are wrapped with:
+//   - 1 byte:  Start marker (0xCD)
+//   - 2 bytes: Message length (MSB, LSB) - length of the protobuf payload
+//   - N bytes: Protobuf-encoded EdidioMessage
+//
+// USAGE:
+//   All communication uses the EdidioMessage wrapper. Set the message_id field
+//   (client-chosen, echoed in responses) and populate exactly one payload field.
+//
+//   Example - Turn on DALI Group 1:
+//     EdidioMessage {
+//       message_id: 1,
+//       dali_message: DALIMessage {
+//         line_mask: 0b0001,
+//         address: 1,
+//         command: DALI_MAX_LEVEL
+//       }
+//     }
+//
+// SUPPORTED PROTOCOLS:
+//   - DALI (Digital Addressable Lighting Interface) - 16-bit and 24-bit
+//   - DALI Type 8 (DT8) - Colour control (XY, Tc, RGBWAF)
+//   - DMX512 - Entertainment lighting
+//   - RDM - Remote Device Management over DMX
+//
+// ============================================================================
+
+syntax = "proto3";
+package edidiov2;
+
+//package com.eds10pb; // Uncomment to enable IDE click-through navigation in generated code
+
+// Machine-readable protocol version, exposed as a compile-time constant in every
+// generated language (e.g. C/nanopb: ProtocolVersion_PROTOCOL_VERSION_CURRENT).
+// Byte-packed as 0x00_MM_mm_PP (major<<16 | minor<<8 | patch), so 1.3.1 -> 0x010301.
+// Monotonically increasing, so compare with >= for capability checks; each field 0-255.
+// Keep in sync with the "// Version" line in the header above.
+enum ProtocolVersion {
+    PROTOCOL_VERSION_UNSPECIFIED = 0;
+    PROTOCOL_VERSION_CURRENT     = 0x010301; // 1.3.1
+}
+
+/*
+ * @exclude - Tag used by documentation generators to exclude sections from API docs.
+ * Remove @exclude tags to include these sections in generated documentation.
+ */
+
+/*********** @exclude ENUMERATIONS/Types ************/
+enum TriggerOperationType {
+    MOMENTARY             = 0;   // A Short Press occurs when a button is pressed for less than 250ms (and at least 50ms). A Long Press occurs when a button is pressed for longer than 650ms. Holding the button down will repeat the Long Press action every 400ms.
+    LATCHING              = 1;   // Instantaneous on short to ground (debounced to 50ms). Trigger occurs once upon entering this state (LOW) and once upon leaving this state (HIGH).
+    MOMENTARY_OUTPUT      = 2;   // A temporary output signal
+    LATCHING_OUTPUT       = 3;   // A continuous output signal
+	ROTARY				  = 4;   // Rotary device, DALI input device
+    MOMENTARY_DISABLED    = 128; // Used to track the enabled/disabled state of an I/O
+    LATCHING_DISABLED     = 129; // Used to track the enabled/disabled state of an I/O
+}
+
+
+enum TriggerType {
+	DALI_ARC                            = 0;    // For controlling DALI Arc Levels (0 to 254) and 255 for MASK
+	DALI_COMMAND                        = 1;    // See (https://en.wikipedia.org/wiki/Digital_Addressable_Lighting_Interface#Commands_for_control_gear) for a list of common DALI commands
+	DMX_CHANNELS_SPLIT_LOW              = 2;    // Sets DMX channel directly. Expects 1-based channel number (1-512)
+	DMX_CHANNELS_SPLIT_HIGH             = 3;    // Sets DMX channel directly. Expects 1-based channel number (1-512)
+	DMX_MULTICAST_CHANNELS_SPLIT_LOW    = 4;    // Sets DMX channel relative to the Zone's configured start address. Expects 0-based offset index
+	DMX_MULTICAST_CHANNELS_SPLIT_HIGH   = 5;    // Sets DMX channel relative to the Zone's configured start address. Expects 0-based offset index
+	DMX_BROADCAST                       = 6;    // Affects all DMX lights as per the Spektra Settings (number of lights and channels per light)
+	DIDIO                               = 7;    // DEPRECATED
+	FADE_UP_WITH_MIN                    = 8;    // DALI Fade Up Command - Query level and set Minimum if Off
+	LIST_START                          = 9;    // Start a List action once
+	LIST_START_CONTINUOUS               = 10;   // Start a List action with repeat 
+	LIST_STOP                           = 11;   // Stop a List
+	SPEKTRA_START_SEQ                   = 12;   // Start a Spektra Sequence
+	SPEKTRA_STOP_SEQ                    = 13;   // Stop a playing Spektra Sequence
+	SPEKTRA_THEME                       = 14;   // Apply a Spektra Theme
+	SPEKTRA_STATIC                      = 15;   // DEPRECATED
+	SPEKTRA_SCHEDULE                    = 16;   // Start the scheduled Spektra item
+	LINK_START                          = 17;   // Enables the UDP Link State - If Configured
+	LINK_STOP                           = 18;   // Temporarily disables the UDP Link State
+	STOP_BURN_IN                        = 19;   // Stop a Burn-In
+	START_BURN_IN                       = 20;   // Start a Burn-In
+	ON_OFF_TOG                          = 21;   // Turn a Group/Address On/Off based on queried arc level. For DALI_GROUP_ALL (broadcast), uses internal toggle state flag
+	MIN_MAX_TOG                         = 22;   // On/Off Toggle replaced by Min/Max
+	ENABLE_INPUT                        = 23;   // Enable Input - If latching, Input will trigger immediately based on current state
+	DISABLE_INPUT                       = 24;   // Disable Input
+	ENABLE_TOG_INPUT                    = 25;   // Toggle Enable/Disable Input
+	OUTPUT_TOG                          = 26;   // Toggle Output State between High (~22Vdc) and Low (0Vdc)
+	OUTPUT_HIGH                         = 27;   // Set Output HIGH
+	OUTPUT_LOW                          = 28;   // Set Output LOW
+	OUTPUT_TRIG                         = 29;   // Set Output to trigger momentarily based on configuration
+	PROFILE_CHANGE                      = 30;   // Change Profile - This action will reset sensor state
+	FADE_LONG_PRESS                     = 31;   // Long Press Fade based on Toggle Flag
+	SYNCRO                              = 32;   // Command sets clock to 11:59PM. Used for hardware time update by external Timeclock
+	PRESET_CODE                         = 33;   // Preset Code - Executes a predefined action sequence stored on the device (index 0-N based on preset_code_count)
+	CUSTOM_CODE                         = 34;   // Project Specific Custom Code - Contact Control Freak for support
+    SPEKTRA_SLEEP                       = 35;   // Pause Spektra sequence
+    SPEKTRA_RESUME                      = 36;   // Resume Spektra sequence
+	DEVICE_RESET						= 37;   // Admin Command for Hardware Reset
+	DEVICE_SAVE							= 38;   // Admin Command for manual device memory save
+    USER_LEVEL_STORE_NEW                = 39;   // Store Current Level to Variable
+    USER_LEVEL_SET_DEFAULT              = 40;   // Reset User Level Variable
+    USER_LEVEL_RECALL                   = 41;   // Recall User Level Variable
+    ROOM_JOIN                           = 43;   // DEPRECATED
+    ROOM_UNJOIN                         = 44;   // DEPRECATED
+	TYPE8_TC_WARMER					    = 45;   // DALI Type 8 Warmer Command. 1 Mirek increments
+	TYPE8_TC_COOLER					    = 46;   // DALI Type 8 Cooler Command. 1 Mirek increments
+	TYPE8_TC_ACTUAL					    = 47;   // DALI Type 8 Set Colour to Mirek value
+	LOGIC_OPERATION                     = 48;   // Execute a conditional logic rule (see LogicMessage)
+	ALARM_ENABLE						= 49;   // Enable Alarm at Index
+	ALARM_DISABLE						= 50;   // Disable Alarm at Index
+	DALI_CONTROL_SENSOR_OVERRIDE        = 51;	// Puts the DALI Sensor in 'override mode', which means it will no longer control the lighting until occupancy has timed-out or control is manually resumed
+	DALI_CONTROL_SENSOR_TEMP_DISABLE    = 52;	// Sets the occupancy timer to zero and puts the DALI Sensor in a temporary 'disable mode' (duration depends on Sensor configuration: 'Disable Period')
+	DALI_CONTROL_SENSOR_RESUME          = 53;	// Takes the DALI Sensor out of 'override mode'
+	DALI_ARC_OVERRIDE                   = 54;	// For controlling DALI Arc Levels (0 to 254) and 255 for MASK - Sets associated group to override mode
+	DALI_COMMAND_OVERRIDE               = 55;   // For sending DALI commands - Sets associated group to override mode
+    FADE_UP_WITH_MIN_OVERRIDE           = 56;   // Non-native DALI command override (sets associated group to override mode)
+    ON_OFF_TOG_OVERRIDE                 = 57;   // Non-native DALI command override (sets associated group to override mode)
+    MIN_MAX_TOG_OVERRIDE                = 58;   // Non-native DALI command override (sets associated group to override mode)
+    MAX_OFF_TOG                         = 59;   // Reserved - Toggle between MAX level and OFF
+    MAX_OFF_TOG_OVERRIDE                = 60;   // Reserved - Toggle between MAX level and OFF with sensor override
+    FADE_LONG_PRESS_OVERRIDE            = 61;   // Non-native DALI command override (sets associated group to override mode)
+    USER_LEVEL_RECALL_OVERRIDE          = 62;   // Non-native DALI command override (sets associated group to override mode)
+	DMX_ZONE_FADE_UP					= 63;   // DMX Spektra Zone Fade UP
+	DMX_ZONE_FADE_DOWN					= 64;   // DMX Spektra Zone Fade DOWN
+	LOGGING_LEVEL						= 65;	// Enable Logging to EEPROM to be read by configurator
+    SPEKTRA_SHOW_CONTROL                = 66;   // DEPRECATED
+    CIRCADIAN_TEMPERATURE               = 67;   // Automatically adjusts DALI Type 8 colour temperature based on time of day (warmer in morning/evening, cooler midday)
+    DALI_CONTROL_SENSOR_MUTE            = 68;   // Mute Sensor at Index (or all with Index 255)
+    DALI_CONTROL_SENSOR_UNMUTE          = 69;   // Unmute to Sensor at Index (or all with Index 255)
+    SPEKTRA_INTENSITY                   = 70;   // Allow you to specify the maximum Spektra Sequence or Theme output intensity (10 to 100)%
+    ENABLE_INPUT_NO_ACTION              = 71;   // Allow you to enable an input (Latching), but not trigger the action.
+    SET_DALI_FADE_TIME                  = 72;   // Sets the DALI Fade Time
+    NO_COMMAND                          = 254;  // This TriggerType should always be at the bottom of the list. Add any new TriggerTypes above it (up to 253).
+
+}
+
+enum ReadType {
+    INPUTS                  = 0;
+    OUTPUTS                 = 1;
+    IR                      = 2;
+    SENSOR                  = 3;
+    // DEPRECATED: SENSORS  (4)     // This was removed because it could potentially exceed buffer size limits
+    LIST                    = 5;
+    // DEPRECATED: LISTS    (6)     // This was removed because it could potentially exceed buffer size limits
+    ALARMS                  = 7;
+    BURN_IN                 = 8;
+    PROJECT                 = 9;
+    NETWORK                 = 10;
+    DEVICE                  = 11;
+    POLL_DATA               = 12;
+    LIST_EXTENDED           = 13;
+	LOGIC	                = 14;
+	DALI_INPUTS             = 15;
+    DMX_TRANSLATIONS        = 16;
+}
+
+enum AlarmRepeatType {
+    ALARM_NO_REPEAT         = 0;
+    ALARM_REPEAT_DAILY      = 1;
+    ALARM_REPEAT_WORK_DAY   = 2;
+    ALARM_REPEAT_WEEKLY     = 3;
+    ALARM_REPEAT_MONTHLY    = 4;
+}
+
+enum AlarmAstroType {
+    ALARM_NO_ASTRO  = 0;
+    ALARM_SUNRISE   = 1;
+    ALARM_SUNSET    = 2;
+}
+
+enum SpektraTargetType {
+    SETTINGS        = 0;
+    SEQUENCE        = 1;
+    THEME           = 2;
+    STATIC          = 3;        // DEPRECATED
+	CALENDAR        = 4;
+    SHOW            = 5;        // DEPRECATED
+    LIVE            = 6;        // Live Update of the Spektra settings
+}
+
+enum SpektraActionType {
+    START  = 0;
+    STOP   = 1;
+    PAUSE  = 2;
+    SAVE   = 3;
+}
+
+enum SpektraStepActionType {
+    RUN_SEQUENCE    = 0;
+    SHOW_THEME      = 1;
+    START_LIST      = 2;
+    PAUSE_PREVIOUS  = 3;
+    STOP_PREVIOUS   = 4;
+}
+
+enum SpektraUnscheduledBehaviourType {
+    RUN_RANDOM_COLOURED_SEQUENCE    = 0;   // Unless otherwise specified, this is a rotate sequence with random colours rotating every 5 seconds
+    RUN_SEQUENCE_1                  = 1;   // Can be used to set a 'Default Sequence' with a known pattern and colour combination
+    RESUME_PREVIOUS                 = 2;   // Resume the last Sequence or Theme that Spektra had active
+    RUN_THEME_1                     = 3;   // Resume to Theme 1
+    RUN_SHOW_1                      = 4;   // Resume to Show 1 
+    DO_NOTHING                      = 254; // Left as the last possible type, fill between 0 and 253 as necessary
+}
+
+enum LineAddressingType {
+    INDEPENDENT = 0;    // Control Lines are independently addressed (e.g. DMX 1 to 512 per line)
+    CONSECUTIVE = 1;    // Control Lines are consecutively addressed (e.g. DMX 1 to 512 on the first line, 513 to 1024 on the next, etc.)
+}
+
+enum AckMessageType {
+    DECODE_FAILED                  = 0;  // May indicate an issue with the protocol (e.g. a mismatch in expected fields between clients). Ensure both parties are using the latest version.
+    INDEX_OUT_OF_BOUNDS            = 1;  // A resource was requested beyond the amount available.
+    UNEXPECTED_TYPE                = 2;  // The provided message was not able to be handled or processed (likely due to a lack of enough information or incorrect values).
+    ENCODE_FAILED                  = 3;  // Not currently in use.
+    KEY_MISMATCH                   = 4;  // Not currently in use.
+    SUCCESS                        = 5;  // The message was decoded and handled successfully.
+    INVALID_PARAMS                 = 6;  // The message was decoded but had invalid data for the intended outcome.
+    UNEXPECTED_COMMAND             = 7;  // The message was decoded but the requested action was not valid for current the state of the device.
+    COMMUNICATION_FAILED           = 8;  // The message could not be received or sent due to an internal issue.
+    COMMUNICATION_TIMEOUT          = 9;  // May indicate contention for a shared resource or that an existing task is taking longer than expected and the latest request has timed-out.
+    DATA_TOO_LONG                  = 10; // May indicate too much data was in the request or the required reply would be too big to handle.
+    UNEXPECTED_CASE                = 11; // May indicate that the message is out of context (e.g. an "end" command for a process that is not running) or that the message requests a feature that is not yet implemented.
+    SLOTS_FULL                     = 12; // Typically indicates that a request was valid, but the relevant content is "full" and thus elements must be removed before continuing.
+    UNAUTHORISED                   = 13; // The message could not be actioned because the connection has not been authorised.
+    PARTIAL_SUCCESS                = 14; // Can be returned in the case where some but not all Lines in a line_mask successfully sent
+    COMMAND_FAILED                 = 15; // For whatever reason, the intended command did not complete
+    DEPRECATED                     = 16; // For message which is no longer supported by this Firmware
+    FORBIDDEN                      = 17; // The connection is authenticated but its role lacks the clearance required for this operation (distinct from UNAUTHORISED, which means not authenticated at all).
+}
+
+// Standard DALI Type 8 Commands - See DALI Standard
+enum Type8CommandType {
+    SET_TEMP_X_COORD                     = 0;   
+    SET_TEMP_Y_COORD                     = 1;
+    ACTIVATE                             = 2;
+    X_COORD_STEP_UP                      = 3;   // Activate Not Required
+    X_COORD_STEP_DOWN                    = 4;   // Activate Not Required
+    Y_COORD_STEP_UP                      = 5;   // Activate Not Required
+    Y_COORD_STEP_DOWN                    = 6;   // Activate Not Required
+    SET_TEMP_COLOUR_TEMPERATURE          = 7;   // DTR1 | DTR as Mirek Value
+    COLOUR_TEMPERATURE_STEP_COOLER       = 8;   // Activate Not Required
+    COLOUR_TEMPERATURE_STEP_WARMER       = 9;   // Activate Not Required
+    SET_TEMP_PRI_N_DIMLEVEL              = 10;
+    SET_TEMP_RGB_DIMLEVEL                = 11;
+    SET_TEMP_WAF_DIMLEVEL                = 12;
+    SET_TEMP_RGBWAF_CONTROL              = 13;
+    COPY_REPORT_TEMPORARY                = 14;
+    STORE_TY_PRI_N                       = 16;
+    STORE_XY_COORD_PRI_N                 = 17;
+    STORE_COLOUR_TEMPERATURE_LIMIT       = 18;
+    STORE_GEAR_FEATURES_STATUS           = 19;
+    ASSIGN_COLOR_LINKED_CH               = 21;
+    START_AUTO_CAL                       = 22;
+    ENABLE_DEVICE_TYPE8                  = 48; 
+    SET_XY_COORDINATE                    = 50;  // Manufacturer Specific combined XY command
+}
+
+// Standard DALI Type 8 Queries - See DALI Standard
+enum Type8QueryType {
+    TYPE8_QUERY_NULL                  = 0; // Required as the first "default" element for the Protocol. Will not perform any action.
+    TYPE8_QUERY_GEAR_FEATURES_STATUS  = 1;        // 247
+    TYPE8_QUERY_COLOUR_STATUS         = 2;        // 248
+    TYPE8_QUERY_COLOUR_TYPE_FEATURES  = 3;        // 249
+    TYPE8_QUERY_COLOUR_VALUE          = 4;        // 250
+    TYPE8_QUERY_RGBWAF_CONTROL        = 5;        // 251
+    TYPE8_QUERY_ASSIGNED_COLOUR       = 6;        // 252
+    TYPE8_QUERY_EXT_VERSION_NUM       = 8;        // 254
+}
+
+// Standard DALI 24 Bit Commands - See DALI Standard
+enum DALI24DeviceSetting {
+    COMMAND_IDENTIFY					= 0x00;
+    COMMAND_RESET_POWER_CYCLE_SEEN		= 0x01;
+    COMMAND_RESET						= 0x10;
+    COMMAND_RESET_MEMORY_BANK			= 0x11;
+    COMMAND_SET_SHORT_ADDRESS			= 0x14;
+    COMMAND_ENABLE_WRITE_MEMORY			= 0x15;
+    COMMAND_ENABLE_APP_CONTROLLER		= 0x16;
+    COMMAND_DISABLE_APP_CONTROLLER		= 0x17;
+    COMMAND_SET_OPERATING_MODE			= 0x18;
+    COMMAND_ADD_TO_DEVICE_GROUPS_0_15	= 0x19;
+    COMMAND_ADD_TO_DEVICE_GROUPS_15_32	= 0x1A;
+    COMMAND_REMOVE_FROM_GROUPS_0_15		= 0x1B;
+    COMMAND_REMOVE_FROM_GROUPS_16_32	= 0x1C;
+    COMMAND_START_QUIESCENT_MODE		= 0x1D;
+    COMMAND_STOP_QUIESCENT_MODE			= 0x1E;
+    COMMAND_ENABLE_POWER_CYCLE_NOTIF	= 0x1F;
+    COMMAND_DISABLE_POWER_CYCLE_NOTIF	= 0x20;
+    COMMAND_SAVE_PERSISTENT_VARIABLES	= 0x21;
+    SET_EVENT_PRIORITY					= 0x61;
+    ENABLE_INSTANCE						= 0x62;
+    DISABLE_INSTANCE					= 0x63;
+    SET_PRIMARY_INSTANCE_GROUP			= 0x64;
+    SET_INSTANCE_GROUP_1				= 0x65;
+    SET_INSTANCE_GROUP_2				= 0x66;
+    SET_EVENT_SCHEME					= 0x67;
+    SET_EVENT_FILTER					= 0x68;
+}
+
+// Standard DALI 24 Bit Instance Types - See DALI Standard
+enum DALI24InstanceType {
+    DEFAULT				= 0x00;
+    INPUT				= 0x01;
+    ROTARY_INPUT        = 0x02;
+    MOTION_SENSOR 		= 0x03;
+    LIGHT_SENSOR	    = 0x04;
+}
+
+// Standard DALI 24 Bit Device Op Codes - See DALI Standard
+enum DALI24OpCode {
+    OPCODE_NULL				                    = 0x00; // No Action
+    // Motion Sensor
+    SENSOR_MOTION_SET_HOLD_TIMER				= 0x21;
+    SENSOR_MOTION_SET_REPORT_TIMER				= 0x22;
+    SENSOR_MOTION_SET_DEADTIME_TIMER			= 0x23;
+    SENSOR_MOTION_CANCEL_HOLD_TIMER				= 0x24;
+
+    // Light Sensor
+    SENSOR_LIGHT_SET_REPORT_TIMER				= 0x30;
+    SENSOR_LIGHT_SET_HYSTERESIS					= 0x31;
+    SENSOR_LIGHT_SET_DEADTIME_TIMER				= 0x32;
+    SENSOR_LIGHT_SET_HYSTERESIS_MIN				= 0x33;
+}
+
+enum LineType {
+    LINE_EMPTY  = 0; // No Hardware in this slot
+    LINE_DALI   = 1; // Physical DALI Board in this slot
+    LINE_DMX    = 2; // Physical DMX Board in this slot
+	LINE_DMX_IN = 3; // Physical DMX Board in this slot - Must be set in the case of DMX to DALI Translation.
+    LINE_AUTO   = 4; // Line will be determined from physical hardware - Do not use for DMX to DALI Translation
+}
+
+enum EventType {
+    REGISTER                = 0; // Sent by the client to register for events.
+    TRIGGER_EVENT           = 1; // Emitted when trigger runs an action listed in TriggerType.
+    INPUT_EVENT             = 2; // Emitted when a physical Input is triggered.
+    SENSOR_EVENT            = 3; // Emitted when a Sensor (24-bit DALI or 25-bit) is triggered.
+    CONTROL_EVENT           = 4; // Emitted when a DALI/DMX/physical output type event is done. References an action in TriggerType.
+    ROOM_JOIN_EVENT         = 5; // Emitted when rooms are joined/unjoined.
+    DALI_24_INPUT_EVENT     = 6; // Emitted when a 24-bit DALI Input Device is triggered.
+    DALI_24_FRAME_EVENT     = 7; // Emitted when a 24-bit DALI Frame is received.
+}
+
+// Standard DALI Queries - See DALI Standard
+enum DALIQueryType {
+    DALI_QUERY_NULL                         = 0; // Required as the first "default" element for the Protocol. Will not perform any action.
+    DALI_QUERY_STATUS                       = 144;
+    DALI_QUERY_BALLAST                      = 145;
+    DALI_QUERY_LAMP_FAILURE                 = 146;
+    DALI_QUERY_LAMP_POWER_ON                = 147;
+    DALI_QUERY_LIMIT_ERROR                  = 148;
+    DALI_QUERY_RESET_STATE                  = 149;
+    DALI_QUERY_MISSING_SHORT_ADDRESS        = 150;
+    DALI_QUERY_VERSION_NUMBER               = 151;
+    DALI_QUERY_DTR0                         = 152;
+    DALI_QUERY_DEVICE_TYPE                  = 153;
+    DALI_QUERY_PHYSICAL_MIN                 = 154;
+    DALI_QUERY_POWER_FAILURE                = 155;
+    DALI_QUERY_DTR1                         = 156;
+    DALI_QUERY_DTR2                         = 157;
+    DALI_QUERY_OPERATING_MODE               = 158;
+    DALI_QUERY_LIGHTSOURCE_TYPE             = 159;
+    DALI_QUERY_ACTUAL_LEVEL                 = 160;
+    DALI_QUERY_MAX_LEVEL                    = 161;
+    DALI_QUERY_MIN_LEVEL                    = 162;
+    DALI_QUERY_POWER_ON_LEVEL               = 163;
+    DALI_QUERY_SYSTEM_FAILURE_LEVEL         = 164;
+    DALI_QUERY_FADETIME_FADERATE            = 165;
+    DALI_QUERY_MANUFACTURER_SPECIFIC_MODE   = 166;
+    DALI_QUERY_NEXT_DEVICE_TYPE             = 167;
+    DALI_QUERY_EXTENDED_FADE_TIME           = 168;
+    DALI_QUERY_CONTROL_GEAR_FAILURE         = 170;
+    DALI_QUERY_SCENE_X_LEVEL                = 176;
+    DALI_QUERY_GROUPS_0_7                   = 192;
+    DALI_QUERY_GROUPS_8_15                  = 193;
+    DALI_QUERY_RANDOM_ADDRESS_H             = 194;
+    DALI_QUERY_RANDOM_ADDRESS_M             = 195;
+    DALI_QUERY_RANDOM_ADDRESS_L             = 196;
+    DALI_QUERY_READ_DTR_0_1                 = 197;
+    DALI_QUERY_APP_EXT_COMMANDS             = 224;
+    DALI_QUERY_EXT_VERSION_NUMBER           = 255;
+    DALI_QUERY_COMPARE                      = 260;
+    DALI_QUERY_VERIFY_SHORT_ADDRESS         = 268;
+    DALI_QUERY_SHORT_ADDRESS                = 269;
+}
+
+// Standard DALI Commands - See DALI Standard
+enum DALICommandType {
+    DALI_OFF                       = 0;
+    DALI_FADE_UP                   = 1;
+    DALI_FADE_DOWN                 = 2;
+    DALI_STEP_UP                   = 3;
+    DALI_STEP_DOWN                 = 4;
+    DALI_MAX_LEVEL                 = 5;
+    DALI_MIN_LEVEL                 = 6;
+    DALI_STEP_DOWN_OFF             = 7;
+    DALI_ON_STEP_UP                = 8;
+    DALI_ENABLE_DAPC_SEQ           = 9; 
+    DALI_RECALL_LAST_ACTIVE_LEVEL  = 10;
+    DALI_CONTINUOUS_UP             = 11;
+    DALI_CONTINUOUS_DOWN           = 12;
+    DALI_RECALL_SCENE_0            = 16;
+    DALI_RECALL_SCENE_1            = 17;
+    DALI_RECALL_SCENE_2            = 18;
+    DALI_RECALL_SCENE_3            = 19;
+    DALI_RECALL_SCENE_4            = 20;
+    DALI_RECALL_SCENE_5            = 21;
+    DALI_RECALL_SCENE_6            = 22;
+    DALI_RECALL_SCENE_7            = 23;
+    DALI_RECALL_SCENE_8            = 24;
+    DALI_RECALL_SCENE_9            = 25;
+    DALI_RECALL_SCENE_10           = 26;
+    DALI_RECALL_SCENE_11           = 27;
+    DALI_RECALL_SCENE_12           = 28;
+    DALI_RECALL_SCENE_13           = 29;
+    DALI_RECALL_SCENE_14           = 30;
+    DALI_RECALL_SCENE_15           = 31;
+    DALI_RESET                     = 32;
+    DALI_STORE_ACTUAL_LEVEL_DTR0   = 33;
+    DALI_SAVE_PERSISTENT_VARS      = 34;
+    DALI_SET_OPERATING_MODE        = 35;
+    DALI_RESET_MEMORY_BANK         = 36;
+    DALI_IDENTIFY_DEVICE           = 37;
+    DALI_SET_MAX_LEVEL             = 42;
+    DALI_SET_MIN_LEVEL             = 43;
+    DALI_SET_SYSTEM_FAILURE_LEVEL  = 44;
+    DALI_SET_POWER_ON_LEVEL        = 45;
+    DALI_SET_FADE_TIME             = 46;
+    DALI_SET_FADE_RATE             = 47;
+    DALI_SET_EXT_FADE_TIME         = 48;
+    DALI_SET_SCENE_0               = 64;
+    DALI_SET_SCENE_1               = 65;
+    DALI_SET_SCENE_2               = 66;
+    DALI_SET_SCENE_3               = 67;
+    DALI_SET_SCENE_4               = 68;
+    DALI_SET_SCENE_5               = 69;
+    DALI_SET_SCENE_6               = 70;
+    DALI_SET_SCENE_7               = 71;
+    DALI_SET_SCENE_8               = 72;
+    DALI_SET_SCENE_9               = 73;
+    DALI_SET_SCENE_10              = 74;
+    DALI_SET_SCENE_11              = 75;
+    DALI_SET_SCENE_12              = 76;
+    DALI_SET_SCENE_13              = 77;
+    DALI_SET_SCENE_14              = 78;
+    DALI_SET_SCENE_15              = 79;
+    DALI_REMOVE_FROM_SCENE_0       = 80;
+    DALI_REMOVE_FROM_SCENE_1       = 81;
+    DALI_REMOVE_FROM_SCENE_2       = 82;
+    DALI_REMOVE_FROM_SCENE_3       = 83;
+    DALI_REMOVE_FROM_SCENE_4       = 84;
+    DALI_REMOVE_FROM_SCENE_5       = 85;
+    DALI_REMOVE_FROM_SCENE_6       = 86;
+    DALI_REMOVE_FROM_SCENE_7       = 87;
+    DALI_REMOVE_FROM_SCENE_8       = 88;
+    DALI_REMOVE_FROM_SCENE_9       = 89;
+    DALI_REMOVE_FROM_SCENE_10      = 90;
+    DALI_REMOVE_FROM_SCENE_11      = 91;
+    DALI_REMOVE_FROM_SCENE_12      = 92;
+    DALI_REMOVE_FROM_SCENE_13      = 93;
+    DALI_REMOVE_FROM_SCENE_14      = 94;
+    DALI_REMOVE_FROM_SCENE_15      = 95;
+    DALI_ADD_TO_GROUP_0            = 96;
+    DALI_ADD_TO_GROUP_1            = 97;
+    DALI_ADD_TO_GROUP_2            = 98;
+    DALI_ADD_TO_GROUP_3            = 99;
+    DALI_ADD_TO_GROUP_4            = 100;
+    DALI_ADD_TO_GROUP_5            = 101;
+    DALI_ADD_TO_GROUP_6            = 102;
+    DALI_ADD_TO_GROUP_7            = 103;
+    DALI_ADD_TO_GROUP_8            = 104;
+    DALI_ADD_TO_GROUP_9            = 105;
+    DALI_ADD_TO_GROUP_10           = 106;
+    DALI_ADD_TO_GROUP_11           = 107;
+    DALI_ADD_TO_GROUP_12           = 108;
+    DALI_ADD_TO_GROUP_13           = 109;
+    DALI_ADD_TO_GROUP_14           = 110;
+    DALI_ADD_TO_GROUP_15           = 111;
+    DALI_REMOVE_FROM_GROUP_0       = 112;
+    DALI_REMOVE_FROM_GROUP_1       = 113;
+    DALI_REMOVE_FROM_GROUP_2       = 114;
+    DALI_REMOVE_FROM_GROUP_3       = 115;
+    DALI_REMOVE_FROM_GROUP_4       = 116;
+    DALI_REMOVE_FROM_GROUP_5       = 117;
+    DALI_REMOVE_FROM_GROUP_6       = 118;
+    DALI_REMOVE_FROM_GROUP_7       = 119;
+    DALI_REMOVE_FROM_GROUP_8       = 120;
+    DALI_REMOVE_FROM_GROUP_9       = 121;
+    DALI_REMOVE_FROM_GROUP_10      = 122;
+    DALI_REMOVE_FROM_GROUP_11      = 123;
+    DALI_REMOVE_FROM_GROUP_12      = 124;
+    DALI_REMOVE_FROM_GROUP_13      = 125;
+    DALI_REMOVE_FROM_GROUP_14      = 126;
+    DALI_REMOVE_FROM_GROUP_15      = 127;
+    DALI_SET_SHORT_ADDRESS         = 128;
+    DALI_ENABLE_WRITE_MEMORY       = 129;
+    DALI_TERMINATE                 = 255;
+    DALI_INITIALISE                = 258;
+    DALI_RANDOMISE                 = 259;
+    DALI_WITHDRAW                  = 261;
+    DALI_SEARCH_ADDR_H             = 264;
+    DALI_SEARCH_ADDR_M             = 265;
+    DALI_SEARCH_ADDR_L             = 266;
+    DALI_PROGRAM_SHORT_ADDRESS     = 267;
+}
+
+// Non-native DALI Commands provided as quality-of-life functions.
+enum CustomDALICommandType {
+    DALI_ARC_LEVEL                 = 0; // DALI Arc level (0 - 254)
+    DALI_DAPC_LEVEL                = 1; // Runs a DALI_ENABLE_DAPC_SEQUENCE if needed.          // DEPRECATED
+    DALI_GROUP_ARC_LEVEL           = 2; // Specified by Group ID (0 - 15)                       // DEPRECATED
+    DALI_BROADCAST_SCENE           = 3; // No specific Address required, sent to all Devices    // DEPRECATED
+    DALI_SCENE_ON_GROUP            = 4; // Specified by Group ID (0 - 15)                       // DEPRECATED
+    DALI_SCENE_ON_ADDRESS          = 5; // Specified by Address (0 - 63)                        // DEPRECATED
+    DALI_QUERY_MULTI_TYPES         = 6; // Query multi-device types, returned as a bitmask
+}
+
+enum AdminPropertyType {
+    DEVICE_NAME         = 0; // The device name that appears on the network. Limited to 16 characters.
+    PROJECT_NAME        = 1; // Used for documentation. Limited to 32 characters.
+    LONGITUDE           = 2; // Used for calculating astronomical sunrise / sunset.
+    LATITUDE            = 3; // Used for calculating astronomical sunrise / sunset.
+    LOCAL_UTC_OFFSET    = 4; // Used for calculating astronomical sunrise / sunset.
+    DAYLIGHT_SAVINGS    = 5; // Used for calculating astronomical sunrise / sunset.
+    POLL_ACTIVE         = 6; // Whether or not to poll the current level of DALI devices to keep an in-memory cache up-to-date.
+    DHCP_ENABLED        = 7; // Whether or not the device should use a static IP or expect a DHCP server to provide it with an IP.
+    IP_ADDR             = 8; // The static IP address to use if DHCP_ENABLED is FALSE.
+    MAC_ADDR            = 9; // The MAC Address of the device. Expected format: [40:D8:55:1B:XX:XX]
+    GATEWAY_IP          = 10; // The IP address of the gateway for the network this device will be installed on.
+    NETWORK_PROPERTIES  = 11; // Contains numerous properties such as DHCP, NTP, Gateway, IP, MAC
+    SYSTEM_PROPERTIES   = 12; // Contains numerous properties such as Device Name (documentation only; not network hostname), Project Name, Latitude, Longitude, UTC Offset, DLS, Polling
+    CONTROLLER_LINES    = 13; // Allows you to specify the daughterboards installed in the device [NONE, DALI, DMX, DMX_IN]
+    EEPROM_FULL_CHIP    = 14; // Allows you to request a reset to default values for all data stored in EEPROM
+    CONFIG_DATA         = 15; // Allows you to request a reset to default values for the Config Data stored in EEPROM
+    SPEKTRA_DATA        = 16; // Allows you to request a reset to default values for the Spektra Data stored in EEPROM
+    DEVICE_STATUS       = 17; // Can be used to request the Device Status: Temperature and Battery Voltage
+    CONFIG_STATUS       = 18; // Can be used to request the Config Status: Active Alarm, List States, Sensor States, Burn-in States
+    DEVICE_TIME         = 19; // Get or Set the RTC time on the device
+    NTP_DETAILS         = 20; // Allows you to Get or Set the NTP parameters (i.e. NTP Server) used for maintaining the RTC via NTP updates.
+    DALI_SENSORS        = 21; // Provides actions for DALI Sensor control: "ADD" to un-mute all. "REMOVE" to mute all. "RESET" to clear all (unprogram).
+    SECURE_SESSION      = 22; // Allows you to Get or Set the "Secure Session" status of the device
+    NONCE               = 23; // Allows you to request a Nonce to perform a Secure Login
+    DALI_SENSOR_TYPE    = 24; // The type of DALI frame (24 or 25-bit) for eDALI packets to/from motion sensors
+    DEVICE_REBOOT       = 25; // Will reboot the device when used with the 'RUN' AdminCommandType
+	SYSTEM_LOGGING      = 26; // Will reset the system logs when used with a 'RESET' AdminCommandType
+    SUBNET              = 27; // The Subnet of the Device
+    DNS                 = 28; // The Primary and Secondary DNS
+    LINK                = 29; // Whether or not the UDP Link state is active
+    LINK_TYPE           = 30; // Type of Link to enable, based on ReadType
+    LINK_MASK           = 31; // Link Index Mask for above
+    LINK_NETMASK        = 32; // Netmask for Link to create Network groups for UDP messaging
+    DALI_RX_TOLERANCE   = 33; // The tolerance for DALI RX (where 10 is 10% above and below nominal half bit time of 416us)
+    DALI_TX_HALF_BIT_TIME = 34; // Default value is 416us
+    DMX_TIMING            = 35; // DMX Timing (I.e. 44Hz)
+    DMX_PROPERTIES        = 36; // DMX Line Properties. Channel Mapping, 16 bit, slot count
+    MEMORY_DIAGNOSTICS    = 37; // GET-only. Returns per-task stack high-water-marks, system-stack HWM, and SRAM/CCMRAM static-section usage. Use with the 'GET' AdminCommandType. Used for tuning FreeRTOS task stack sizes and monitoring runtime RAM headroom.
+    ETHERNET_DIAGNOSTICS  = 38; // GET-only. Returns Ethernet PHY register snapshot, Ethernet MAC counters, resolved link state, and a ring buffer of recent link-state transitions. Use with the 'GET' AdminCommandType. Used to diagnose link/auto-negotiation/duplex-mismatch issues without an SD card.
+    LINE_DIAGNOSTICS      = 39; // GET-only. Per-line readout of configured-vs-probed daughterboard type plus a coarse OK/FAULTY/EMPTY/MISCONFIGURED verdict. Briefly perturbs each line (a DALI half-bit pulse and/or a DMX RX-mode window) — fire on demand, not on a hot loop. Use with the 'GET' AdminCommandType.
+    TIME_DIAGNOSTICS                  = 40; // GET-only. RTC/NTP/DST observability: LSE crystal ppm measurement, lifetime NTP success/failure counts, last sync details, time-set audit trail, backup-domain boot counter, DST visibility. Use with the 'GET' AdminCommandType.
+    RTC_TEMP_COMP_ENABLED             = 41; // GET/SET. Enable/disable the temperature-driven smooth calibration of the RTC. Persisted in BKPSRAM (reset on battery loss). Default 1.
+    RTC_PPM_MANUAL_OVERRIDE           = 42; // GET/SET. When enabled (override flag in PayloadMessage), the RTC smooth calibration is set to a fixed signed ppm value at every hour boundary, bypassing temp comp. Persisted in BKPSRAM.
+    NTP_FORCE_SYNC                    = 43; // RUN. Triggers an immediate NTP sync attempt.
+    NTP_POLL_PERIOD_SECONDS           = 44; // GET/SET. Override the NTP poll period. 0 means use the existing NTP_DETAILS.NTPTimeout from config. Non-zero is persisted in BKPSRAM.
+    NTP_MAX_ACCEPTABLE_DELTA_SECONDS  = 45; // GET/SET. NTP corrections whose |delta| exceeds this value are rejected (treated as a sanity-check failure). Default 3600 (1 hour). Persisted in BKPSRAM.
+    TIME_DIAG_MEASURE_LSE             = 46; // RUN. Triggers an on-demand LSE-vs-HSE ppm measurement (~250 ms). Result is cached and returned on the next GET TIME_DIAGNOSTICS.
+    BACKUP_DOMAIN_RESET_CANARY        = 47; // RUN. Resets the boots_since_last_backup_loss counter to 0. Use after a deliberate battery replacement so the counter reflects only post-replacement boots.
+    DALI_STATUS                       = 48; // GET-only. Returns the DALI system status summary (per-line online/fault device counts, bus-power errors, lowest faulting address, and missing/comms-error device bitmaps) — the same data the on-device Logic system evaluates for "any DALI error" actions. Use with the 'GET' AdminCommandType.
+    USER_ACCOUNT                      = 49; // SET-only (ADMIN clearance). Provisions a role's login secret (see AdminUserAccountMessage). Write-only — secrets are never returned by a GET.
+}
+
+// Used with AdminPropertyType
+enum AdminCommandType {
+    SET         = 0; // Set property
+    GET         = 1; // Get property
+    ADD         = 2; // Add property
+    REMOVE      = 3; // Remove property
+    RESET       = 4; // Reset property
+    RUN         = 5; // Run property
+}
+
+// DALI status query response bitmask values - See DALI Standard
+// IEC 62386-102 control-GEAR status byte (reply to the 16-bit QUERY STATUS, for lamps/drivers).
+// NOTE: this is NOT the IEC 62386-103 control-DEVICE deviceStatus (reply to the 24-bit QUERY DEVICE STATUS
+// used for input devices/sensors). For a SENSOR power cycle, powerCycleSeen is deviceStatus bit5 (0x20), not
+// the bit7 (=128) below.
+enum DALIStatusType {
+    LAMP_OFF              = 0; // Not technically in DALI. But this is the default when mask = 0b00000000
+    CONTROL_GEAR_FAILURE  = 1;
+    LAMP_FAILURE          = 2;
+    LAMP_ON               = 4;
+    LIMIT_ERROR           = 8;
+    FADE_RUNNING          = 16;
+    RESET_STATE           = 32;
+    SHORT_ADDRESS         = 64;
+    POWER_CYCLE_SEEN      = 128;
+}
+
+// DALI Receive Flag 
+enum DALIRXStatusFlag {
+	WAITING                     = 0; // Internal Idle State - Should not be received
+	RECEIVING_FRAME             = 1; // DALI Frame being Received
+	NO_RECEIVED_FRAME           = 2; // Frame was recorded - Empty Data
+	RECEIVED_8_BIT_FRAME        = 3; // Frame was recorded - 8 Bit Reply
+	RECEIVED_16_BIT_FRAME       = 4; // Frame was recorded - 16 Bit - Standard Message
+	RECEIVED_24_BIT_FRAME       = 5; // Frame was recorded - 24 Bit - eDALI Message
+    RECEIVED_PARTIAL_FRAME      = 6; // Frame was recorded - Unusual Bit count
+	IDLE                        = 7; // DALI System Idle
+	CALIBRATION                 = 8; // Inhouse DALI Calibration
+	ERROR_WHILE_SENDING         = 254; // Error while trying to Transmit DALI - Possibly no Bus Power
+	ERROR_WHILE_RECEIVING       = 255; // Error while trying to Receive - Invalid Frame Data, or no response
+}
+
+enum DiagnosticMessageType {
+    DIAGNOSTIC_SYSTEM_INFO   = 0; // Can be used to retrieve a large number of properties that describe the capabilities of the device. (Number of supported Lists, Alarms, etc.).
+    DIAGNOSTIC_INPUT_STATUS  = 1; // Not currently supported (will default to SYSTEM_INFO).
+    DALI_LEVEL_CACHE         = 2; // Can be used to retrieve the current entries of the in-memory DALI values cache.
+    DMX_LEVEL_CACHE          = 3; // Can be used to retrieve the current entries of the in-memory DMX levels cache. Results must be paginated due to size of DMX universe (512).
+    ROOM_JOINS               = 4; // DEPRECATED - Can be used to manipulate the "Joined Rooms" state.
+    DALI_STATUS_CACHE        = 5; // Can be used to retrieve the current entries of the in-memory DALI status cache.
+}
+
+enum FirmwareCommandType {
+	FW_READY           = 0; // System Ready for Firmware Message
+	FW_APPLY           = 1; // Sent to controller to initiate a Firmware update
+	FW_VERIFY          = 2; // Sent to controller to initiate stored Firmware verification - This will complete the firmware upload mode and unlock normal functionality. 
+	FW_VERIFY_FAILED   = 3; // Received from controller - Issue with stored Firmware
+	FW_VERIFY_SUCCESS  = 4; // Received from controller - Stored Firmware is Valid
+	FW_READ            = 5; // Sent to controller to request information for currently stored Firmware
+    FW_CLONE           = 6; // Command to Clone Main FW to Backup. Using the firmware_is_backup flag will clone Backup to Main
+}
+
+enum SpektraTransitionType {
+	BLEND           = 0;    // Blended colour transitions. Example: Transition between red and green will go through yellow.
+    SNAP            = 1;    // Instant colour transitions.
+    FADE_TO_BLACK   = 2;    // Example: Transition between red and green will fade the light off then on between colours. Not currently supported.
+}
+
+// Types of conditions that can be evaluated in Logic rules
+enum LogicType {
+	DALI_LEVEL          = 0;    // Compare against a DALI device's arc level (0-254)
+	INPUT_STATE         = 1;    // Compare against a physical input's current state (HIGH/LOW)
+	LIST_RUNNING        = 2;    // Check if a specific List is currently running
+	OCCUPANCY_DETECTED  = 3;    // Check if a sensor has detected occupancy
+	DMX_PRESENT         = 4;    // Check if DMX input signal is being received
+	CAL_WEEKDAY         = 5;    // Compare against current day of week (1=Monday to 7=Sunday)
+	CAL_MONTH           = 6;    // Compare against current month (1=January to 12=December)
+	ALARM_SCHEDULED     = 7;    // Check if a specific alarm/schedule is active
+    DALI_CACHE_STATUS   = 8;    // Checks if any DALI device in the cache has an error status
+    HAS_ERROR           = 9;    // Check device error flags. target_index is bitmask: [bit0=DALI Poll Error, bit1=DALI Line Error, bit2=Ethernet Link Dropped, bit3=Over Temperature, bit4=OLED Error, bits5-7=Reserved]
+}
+
+enum LogicComparisonType {
+	LESS_THAN           = 0;
+	LESS_THAN_OR_EQUALS = 1;
+	EQUALS              = 2;
+	MORE_THAN           = 3;
+	MORE_THAN_OR_EQUALS = 4;
+	NOT_EQUAL           = 5;
+    BIT_OR              = 6;
+    BIT_AND             = 7;
+    BIT_XOR             = 8;
+}
+
+enum DALISensorType {
+    EDALI_25_BIT        = 0; // 25-bit frame type for a vendor-specific pre-configured sensor
+    DEFAULT_DALI_2      = 1; // The default 24-bit DALI 2 frames
+}
+
+enum SensorCommandType {
+    INITIALISE  = 0; // Applies default settings to all Sensors (broadcast) and resets their detection state
+    MUTE        = 1; // Stops a Sensor from sending DALI packets
+    UNMUTE      = 2; // Allows a Sensor to send DALI packets
+    OVERRIDE    = 3; // Puts a Sensor in 'Override Mode' which prevents it from adjusting the Light Level (until after the occupancy timeout occurs)
+    IDENTIFY    = 4; // Starts the 'Identify' behaviour of a Sensor (typically this involves rapid flashing of the status LED for several seconds)
+}
+
+// Categories of events recorded in the system log
+enum SystemLogType {
+	BOOT        = 0;    // Device power-on or reboot event
+	NET_LINK    = 1;    // Ethernet link state change (connected/disconnected)
+	NTP         = 2;    // NTP time synchronization event
+	TRIGGER     = 3;    // Trigger action executed (input, schedule, or external)
+	SPEKTRA     = 4;    // Spektra sequence/theme state change
+	SCHEDULE    = 5;    // Scheduled alarm triggered
+	USER        = 6;    // User changed logging level configuration
+	CRASH           = 7;    // Crash record summary (crash_type, PC, CFSR, LR low-16)
+	WATCHDOG_RESET  = 8;    // Watchdog-triggered reset
+	CRASH_EXT       = 9;    // Extended crash data (SP, watchdog_flags, task_name)
+}
+
+// Input event types from DALI-2 (24-bit) input devices
+enum DALI24InputType {
+    MOMENTARY_SHORT     = 0;    // Short button press (< 250ms)
+    MOMENTARY_LONG      = 1;    // Long button press (> 650ms)
+    LATCHED_LOW         = 2;    // Switch transitioned to closed/low state
+    LATCHED_HIGH        = 3;    // Switch transitioned to open/high state
+    POSITIONAL          = 4;    // Rotary encoder or slider position value
+}
+
+// State machine for DALI motion sensor occupancy detection
+enum DALIMotionSensorStates {
+    MOTION_IDLE        = 0;     // No occupancy detected, lights at idle/off level
+    MOTION_DISABLED    = 1;     // Sensor is muted or in deadtime period
+    MOTION_WARNING     = 2;     // Occupancy timeout reached, lights dimmed to warning level
+    MOTION_OCCUPANCY   = 3;     // Active occupancy detected, lights at occupied level
+}
+
+// State machine for DALI light level (lux) sensor daylight harvesting
+enum DALILuxSensorStates {
+    LUX_DISABLED    = 0;        // Daylight harvesting is inactive
+    LUX_ENABLED     = 1;        // Actively regulating to maintain target lux setpoint
+    LUX_DEVIATE     = 2;        // Light level has deviated significantly from setpoint
+}
+
+/********** @exclude General Messages ****************/
+// Sent in Response to another message.
+message AckMessage {
+    AckMessageType payload  = 1;    // Will either indicate 'Success' or a particular Error as specified by "AckMessageType"
+    uint32 detail           = 2;    // Optional context. Interpretation depends on payload type: for PARTIAL_SUCCESS on a DALI multi-line command it is the bitmask of lines that succeeded; for an ERROR payload (e.g. INVALID_PARAMS) it is a RejectReason code naming the specific reason (0 = unspecified); for a SUCCESS ack to a secure login it is the granted clearance level (0=NONE, 1=CONTROL, 2=CONFIG, 3=ADMIN).
+}
+
+// Refines an ERROR AckMessageType with a specific, machine-readable reason, carried in AckMessage.detail
+// (detail stays a uint32 - for SUCCESS / PARTIAL_SUCCESS it keeps its existing meaning, e.g. a line bitmask).
+// 0 = unspecified so older firmware (detail defaults to 0) gracefully degrades to the generic ack message.
+// The CLIENT owns the human-readable strings; this enum is the shared code<->meaning contract so firmware and
+// app never drift. Values are allocated in 1000-wide blocks per subsystem - add new reasons to the owning
+// block, never renumber (gaps are free). uint32/varint: a value stays 2 wire-bytes up to 16383, and the field
+// itself reaches ~4.29e9, so the block scheme is effectively open-ended.
+//   1-999       general / protocol (cross-cutting)
+//   1000-1999   sensors
+//   2000-2999   inputs
+//   3000-3999   outputs
+//   4000-4999   lists
+//   5000-5999   schedules / alarms
+//   6000-6999   zones
+//   7000-7999   sequences / themes / colour
+//   8000-8999   DALI commissioning / addressing
+//   9000-9999   network / config
+//   10000-10999 admin
+//   11000-11999 firmware update / apply
+enum RejectReason {
+    REJECT_UNSPECIFIED                 = 0;    // No specific reason (older firmware, or a generic reject)
+
+    // --- 1-999 general / protocol (cross-cutting) ---
+    GENERAL_REQUIRES_NEWER_FIRMWARE    = 1;    // The controller firmware is older than the requested feature needs
+    GENERAL_UNSUPPORTED_ON_VARIANT     = 2;    // Not supported on this hardware variant
+
+    // --- 1000-1999 sensors ---
+    SENSOR_BAD_LINE                    = 1000; // V4: a sensor must sit on exactly one valid DALI line
+    SENSOR_ADDRESS_OUT_OF_RANGE        = 1001; // V4: sensor short address must be 0-63
+    SENSOR_CONTROL_LINE_INVALID        = 1002; // V4: control line mask falls outside the available lines
+    SENSOR_CONTROL_TARGET_INVALID      = 1003; // V4: control group/address is out of range
+    SENSOR_TIMER_OUT_OF_RANGE          = 1004; // V8: a timer value would overflow once stored/scaled
+    SENSOR_LEGACY_GROUPING             = 1005; // V7': non-zero legacy motion_sensors (an OLD client) - update the app
+    SENSOR_LEADER_WITHOUT_GROUP        = 1006; // V9: Leader role set without a cooperation group
+    SENSOR_GROUP_ID_INVALID            = 1007; // V9: cooperation group id is too large
+    SENSOR_HARVEST_NO_CONTROL_LINE     = 1008; // V1: a daylight-harvesting sensor must drive at least one line
+    SENSOR_HARVEST_QUERY_ADDR_INVALID  = 1009; // V1: the harvesting seed query address must be a single 0-63 device
+    SENSOR_HARVEST_NO_SETPOINT         = 1010; // V1: the harvesting setpoint must be greater than 0
+    SENSOR_GROUP_MIXED_TARGET          = 1011; // V2': ACTIVE members of one group must share the control target
+    SENSOR_DUPLICATE_ADDRESS           = 1012; // V10: another programmed sensor already uses this (short address, DALI line) - one physical sensor's events would drive multiple slots
+
+    // --- 11000-11999 firmware update / apply (returned in an AckMessage(COMMAND_FAILED) reply to FW_APPLY) ---
+    FIRMWARE_APPLY_NO_IMAGE            = 11000; // No firmware image is staged in the target slot
+    FIRMWARE_APPLY_CHECKSUM_FAILED     = 11001; // Staged image failed the XOR checksum verify (corrupt or incomplete upload)
+    FIRMWARE_APPLY_BAD_STRUCTURE       = 11002; // Staged image geometry is not cleanly flashable (bad/misaligned chunk addressing) - would brick on handoff
+    FIRMWARE_APPLY_UNSIGNED            = 11003; // No image signature was present - device rejects as unsigned
+    FIRMWARE_APPLY_SIGNATURE_INVALID   = 11004; // Image signature present but did not verify (wrong key, tampered, or content mismatch)
+    FIRMWARE_APPLY_INCOMPLETE          = 11005; // A staged chunk could not be read back (blank/unreadable page) even after retries - the staged image is incomplete/corrupt in flash, NOT a geometry problem. Re-upload.
+    FIRMWARE_UPLOAD_SLOT_NOT_ERASED    = 11006; // Upload: the target page already held DIFFERENT data (the slot was not cleanly erased) - abort and restart the upload
+    FIRMWARE_UPLOAD_WRITE_FAILED       = 11007; // Upload: the post-write read-back did not match what was sent (flash write did not take) - retry the chunk / upload
+    FIRMWARE_SESSION_BUSY              = 11008; // Another connection already owns the firmware update session (single-owner) - wait for it to finish or disconnect, then retry
+    FIRMWARE_APPLY_NO_CONF_KEY         = 11009; // V3: the image is encrypted but the device has no key to decrypt it - provision the device first
+    FIRMWARE_APPLY_DECRYPT_FAILED      = 11010; // V3: image decryption failed - image not applied
+    FIRMWARE_APPLY_BOOTLOADER_INCOMPATIBLE = 11011; // The staged image needs a firmware format this device's bootloader cannot decode - provide a compatible image
+}
+
+// Contains a payload. Used in multiple message types. Incorrect payload type will result in AckMessage Unexpected Type.
+message PayloadMessage {
+    oneof data {
+        uint32 uint_data     = 1; // Binary Flags set with 0 (FALSE) and 1 (TRUE)
+        float float_data     = 2;
+    }
+    string string_data       = 3; // Every PayloadMessage will contain String data, with optional uint or float data
+}
+
+// "Are You There" Message with some supplementary values for debugging. "Are you there?" messages should be sent within 20 seconds to maintain a connection. However, any received message will reset this timer.
+message AytMessage {
+	uint32 timesinceboot    = 1;	// Device uptime in seconds
+	float temperature       = 2;	// Current Temp on the device internals
+	TimeClockMessage time   = 3;	// Current Time of the RTC
+}
+
+// This message contains the 'variable state' for the Device
+message DeviceStateMessage {
+    uint32 uptime                       = 1;    // Uptime (seconds since boot)
+    float temp                          = 2;    // Temperature
+    float vbat                          = 3;    // Battery voltage
+    TimeClockMessage clock              = 4;    // RTC Time on device
+    uint32 next_alarm                   = 5;    // Index of next alarm
+    TimeClockMessage next_alarm_time    = 6;    // Time of next alarm
+    uint32 input_state                  = 7;    // Input state mask
+    repeated uint32 list_states         = 8;    // State of each List (DISABLED / ENABLED / LOOPING)
+	repeated uint32 burn_in_states      = 9;    // State of each Burn-in (RUNNING / NOT RUNNING)
+	repeated uint32 sensor_states       = 10;   // State of each DALI Sensor (IDLE / DISABLED / WARNING / OCCUPANCY)
+    repeated uint32 zone_states         = 11;   // State of each Spektra Zone (OFF / SEQUENCE / THEME / STATIC)
+    repeated uint32 zone_sleep_states   = 12;   // Sleep State of each Spektra Zone (TRUE / FALSE)
+    repeated uint32 zone_indexes        = 13;   // Index of the selected Sequence, Theme, or Static colour for each Zone
+	uint64 dali_input_state			    = 14;	// DALI Input state mask
+    uint32 output_state                 = 15;   // Output state mask
+}
+
+/****** @exclude CONFIGURABLE MESSAGES ******/
+// Trigger Message Structure. Stores all information for Trigger Type Actions
+message TriggerMessage {
+    TriggerType type     = 1; // The type of Trigger
+    uint32 zone          = 2; // Which Zone (Spektra)
+    uint32 line_mask     = 3; // Which Line(s) to perform this trigger on (if applicable)
+    uint32 target_index  = 4; // Index to target (context depends on TriggerType)
+    uint32 value         = 5; // Value for this trigger (if applicable)
+    uint32 query_index   = 6; // Index to query (if applicable)
+}
+
+// Date/Time Message Structure. Year is 0-99. Month is 1 (Jan) - 12 (Dec), Date is day of the month, Day is Weekday with 1 (Monday) - 7 (Sunday)
+message TimeClockMessage {
+    uint32 date  = 1;    // Year | Month | Date | Day 
+    uint32 time  = 2;    // <Empty> | Hour | Minute | Second
+}
+
+// Message to describe the two Burn-In objects
+message BurnInBitsMessage {
+    uint32 light_state   = 1; // Tracks when a Light is 'On' and "burning in"
+    uint32 running_flag  = 2; // Whether or not the burn-in is currently counting down
+    uint32 enable_flag   = 3; // Whether or not the burn-in should count down
+}
+
+// Message to describe the 12 or 24 Physical Inputs. Not sent natively, see InputMultiMessage
+message IOInputMessage {
+    uint32 index                       = 1; // Which Input is this (0 - 11) on 4 Pole and (0 - 23) on 9 Pole
+    TriggerOperationType button_state  = 2; // How will this Input be triggered? Momentary (short/long press) or Latching (low/high)
+    TriggerMessage short_press         = 3; // What action should occur on short/low
+    TriggerMessage long_press          = 4; // What action should occur on long/high
+}
+
+// Message to describe the 4 or 8 Physical Outputs. Not sent natively, see OutputMultiMessage
+message IOOutputMessage {
+    uint32 index                    = 1; // Which Output is this? (0 - 3) on 4 Pole and (0 - 7) on 9 Pole. Note: Actual Pin numbers are (9 - 12) and (21 - 24) respectively.
+    uint32 initial_level            = 2; // Will the Output be Low or High at startup?
+    uint32 time_trigger_is_active   = 3; // How long should a 'Trigger Output' command last?
+    TriggerOperationType type       = 4; // Is this a continuous (latching) trigger or momentary output?
+}
+
+// Message to describe the (Up to) 40 DALI 2 Input Devices. Not sent natively, see DALIInputMultiMessage
+message DALIInputMessage {
+    uint32 index                       = 1; // Which index for this Input
+    uint32 address                     = 2; // The eDALI Address of this Input
+    uint32 dali_line                   = 3; // The DALI Line this Input is on
+    TriggerOperationType button_state  = 4; // How will this Input be triggered? Momentary (short/long press) or Latching (low/high)
+    TriggerMessage short_press         = 5; // What action should occur on short/low
+    TriggerMessage long_press          = 6; // What action should occur on long/high
+    uint32 instance                    = 7; // What instance of the device? If it has multiple inputs
+}
+
+// Message to describe the Infrared Input (DEPRECATED)
+message IOIRMessage {
+    uint32 index           = 1;
+    TriggerMessage action  = 2;
+    uint32 codes           = 3;
+}
+
+// Message to describe the (Up to) 40 DALI 2 Sensors. Not sent natively, see SensorMultiMessage
+message SensorMessage {
+    uint32 profile                      = 1;  // Under which Profile is this Sensor active?
+    uint32 index                        = 2;  // The index for this Sensor
+    uint32 sensor_address               = 3;  // The eDALI Address of this Sensor (assumes address of "L" (Light) component with "M" (Motion) at L + 1)
+    uint32 sensor_dali_line             = 4;  // The DALI Line this Sensor is on
+    uint32 address_query                = 5;  // The DALI Address to query for Group-based control
+    uint32 control_dali_line            = 6;  // The DALI Line (mask) to control
+    uint32 control_group                = 7;  // The DALI Group Address to control
+    uint32 light_setpoint               = 8;  // The Lux level to maintain during Daylight Harvesting
+    uint32 warning_setpoint             = 9;  // DEPRECATED (superseded by warning_trigger) - The Arc level to set during the Warning Period
+    uint32 motion_only                  = 10; // Is this Sensor used for motion detection only? If False, Daylight Harvesting will be in effect
+    uint32 timeout_values               = 11; // Occupancy hold time in MINUTES (firmware multiplies by 60 internally) - duration after last motion detection before entering Warning Period
+    uint32 warning_values               = 12; // Warning period duration in seconds - time spent in dimmed state before transitioning to Idle/Off
+    uint32 disable_values               = 13; // Deadtime period in seconds - delay after timeout before the Sensor resumes motion detection
+    uint32 input_1_pm                   = 14; // DEPRECATED - The first Input button used for Two-Button Programming
+    uint32 input_2_pm                   = 15; // DEPRECATED - The second Input button used for Two-Button Programming
+    uint32 sensor_states                = 16; // DEPRECATED (firmware-internal, not configuration) - Used to keep track of the Motion Sensor state
+    uint32 motion_sensors               = 17; // DEPRECATED since FW 1.3.0 (Phase 3): legacy 32-bit grouping bitmask. New firmware REJECTS a
+                                              // non-zero value here with INVALID_PARAMS - re-push from an updated SpektraPlus. See coop_group/coop_leader.
+    uint32 lux_sensors                  = 18; // DEPRECATED (firmware-internal, not configuration) - Used to keep track of the Light (Lux) Sensor state
+    uint32 off_flag                     = 19; // DEPRECATED (firmware-internal, not configuration) - Used to keep track of the Control Group's state
+    bool is_programmed                  = 20; // Set to 'True' when the Firmware receives a SensorMessage with this Index
+    TriggerMessage detection_trigger    = 21; // The action to perform upon initial detection
+    TriggerMessage warning_trigger      = 22; // The action to perform upon transitioning to the Warning Period
+    TriggerMessage idle_trigger         = 23; // The action to perform upon transitioning to the Idle (disable) Period
+    uint32 coop_group                   = 24; // Cooperative directional group ID (1..0x7FFFFFFF; 0 = standalone). Replaces motion_sensors.
+                                              // Members of the same non-zero group cooperate; Leader members propagate occupancy & share lux.
+    uint32 coop_leader                  = 25; // 1 = Leader member (its motion keeps the group on; shares the daylight-harvest mean with other
+                                              // Leader members). 0 = Follower (kept on by Leader members; fires its own triggers; harvests its own zone).
+}
+
+// Message to Query running sensor data
+message SensorQuery {
+  uint32 timer                          = 1; // Time Remaining in seconds
+  uint32 light_state                    = 2; // Light Group State
+  uint32 motion_sensor_state            = 3; // Motion Sensor State
+  uint32 lux_sensor_state               = 4; // Lux Sensor State
+  uint32 last_lux                       = 5; // Last reported lux (sensor device-relative units, not absolute lux)
+  uint32 last_commanded_arc             = 6; // Last DALI arc level (0-254) commanded by daylight harvesting
+  bool   is_group_master                = 7; // TRUE when this sensor is the active controller of its cooperative harvesting group
+  uint32 control_group                  = 8; // Effective control target: group/address the sensor maintains
+  uint32 control_dali_line              = 9; // Effective control target: DALI line mask the sensor controls
+  bool   lux_seeded                     = 10; // FALSE while the harvest loop is awaiting its first real 304 reading after occupancy (last_lux / last_commanded_arc are still the previous occupancy's values until TRUE)
+  uint32 light_setpoint                 = 11; // The DEVICE-resident daylight-harvest setpoint the loop actually regulates against (active profile). Lets the app draw the set-point line from the device, not its own config, so a device/app divergence is visible.
+  uint32 group_mean_lux                 = 12; // The blended lux the harvest master regulates on (mean of active Leader members of this sensor's cooperative group). Equals last_lux for a standalone/Follower sensor.
+}
+
+message SensorsQuery {
+    repeated SensorQuery sensors    = 1; // A page of up to 20 SensorQuery entries starting at 'offset' (device holds 40; see nanopb max_count)
+    uint32 offset                   = 2; // Request: absolute index of the first sensor to return (0-based; 0 = first page). Response: echoes the offset of this page so the client can place the entries at absolute slots.
+    uint32 total_count              = 3; // Response only: total number of sensors on the device. Lets the client page until offset + sensors.length >= total_count. Omitted (0) on older firmware, which returns every sensor in one page.
+}
+
+// List Step Structure for List Actions
+message ListStepMessage {
+    uint32 step_index      = 1; // Index of Step in List
+    TriggerMessage action  = 2; // Action to perform
+    uint32 time_seconds    = 3; // Time in seconds between steps, uint16_t value 
+}
+
+// Message to describe Scheduled Actions. Not sent natively, see AlarmMultiMessage
+message AlarmMessage {
+    uint32 index                    = 1; // Alarm Index from 0 - 9
+    bool enabled                    = 2; // Enabled Flag - FALSE (0) or TRUE (1)
+    TimeClockMessage start_time     = 3; // Time to Start Action, or Astro Offset
+    TimeClockMessage end_time       = 4; // Time to Stop Action, or Astro Offset
+    TriggerMessage start_trigger    = 5; // Trigger Action to perform at start time
+    TriggerMessage end_trigger      = 6; // Trigger Action to perform at end time
+    AlarmAstroType astro_start      = 7; // Start Time Type
+    AlarmAstroType astro_end        = 8; // End Time Type
+    AlarmRepeatType repeat          = 9; // Alarm Repeat Type
+    uint32 repeat_day_bitmask       = 10; // 1 to trigger on this day. LSB (0) = Monday, MSB (6) = Sunday
+    uint32 repeat_month_bitmask     = 11; // 1 to trigger during this month. LSB (0) = January, MSB (11) = December
+    bool yearly                     = 12; // Should this Alarm happen each year?
+    bool start_offset_is_before     = 13; // E.g. 10 minutes BEFORE or AFTER the start astro event?
+    bool end_offset_is_before       = 14; // E.g. 10 minutes BEFORE or AFTER the end astro event?
+}
+
+// Message to describe the two Burn-In Actions. While Burn-In is active, the system will check associated DALI line and group and prevent any action other than 100% or 0%. Any value set over 1% will be forced to 100%. Not sent natively, see BurnInMultiMessage
+message BurnInMessage {
+    uint32 index              = 1;
+    uint32 line               = 2;
+    uint32 address            = 3;
+    uint32 query_address      = 4;
+    uint32 time               = 5;
+    uint32 remaining          = 6;
+    BurnInBitsMessage states  = 7;
+}
+
+// This message will allow an externally connected device to send a Trigger action
+message ExternalTriggerMessage {
+    TriggerMessage trigger  = 1; // Can be used to action Triggers via the network instead of via a hardware input or on-board alarm
+}
+
+// Message used to send all Physical Inputs, for a specific profile
+message InputMultiMessage {
+    uint32 profile                  = 1;
+    repeated IOInputMessage inputs  = 2;     
+}
+
+// Message used to send all Outputs, for a specific profile
+message OutputMultiMessage {
+    uint32 profile                    = 1;
+    repeated IOOutputMessage outputs  = 2;
+}
+
+// Message used to send all DALI Inputs, for a specific profile
+message DALIInputMultiMessage {
+	uint32 profile 					  = 1;
+    uint32 input_index_offset         = 2; // To support paginated results (0-9, 10-19, 20-29, 30-39)
+	repeated DALIInputMessage inputs  = 3;
+}
+
+// DEPRECATED
+message IRMultiMessage {
+    uint32 profile            = 1;
+    repeated IOIRMessage irs  = 2;
+}
+
+// Message used to send a List. If more than 32 steps in the list, the ExtendedListMessage is used repeatedly to send the remainder.
+message ListMessage {
+    uint32 list_index              = 1;
+    repeated ListStepMessage step  = 2; // Limited to 32 for this Message Type; you must use ExtendedListMessage to configure more than 32 steps per List
+    uint32 list_state              = 3; // Typically will be 'DISABLED' to start with (requires a 'START LIST' trigger to begin)
+    uint32 total_step_count        = 4; // Can be greater than 32, but you must use ExtendedListMessage to send the rest
+}
+
+// This Message must be used when the List has more than 32 steps
+message ExtendedListMessage {
+    uint32 list_index              = 1; // Which List do these steps belong to?
+    uint32 step_index_offset       = 2; // 0 for the first ExtendedListMessage; offset by 32 for every ExtendedListMessage beyond the first
+    repeated ListStepMessage step  = 3;
+}
+
+// Message used to send the Alarms
+message AlarmMultiMessage {
+    repeated AlarmMessage alarm  = 1;
+}
+
+// Message used to send the Burn-Ins
+message BurnInMultiMessage {
+    repeated BurnInMessage burnin  = 1;
+}
+
+// Defines a conditional logic rule that evaluates a condition and executes an action based on the result
+message LogicMessage {
+	uint32 index                            = 1;    // Index of this logic rule (0 to logic_count-1)
+	bool enabled                            = 2;    // Whether this logic rule is active
+	TriggerMessage comparison_object        = 3;    // The source value to evaluate (e.g., DALI level, input state)
+	uint32 comparison_value                 = 4;    // The threshold/setpoint value to compare against
+	LogicComparisonType comparison_type     = 5;    // How to compare: equals, less than, greater than, etc.
+	TriggerMessage actionA                  = 6;    // Action to execute if comparison evaluates to TRUE
+	TriggerMessage actionB                  = 7;    // Action to execute if comparison evaluates to FALSE
+}
+
+// Container for multiple logic rules (used when reading/writing all logic rules at once)
+message LogicMultiMessage {
+	repeated LogicMessage logic = 1;    // Array of logic rules (max logic_count entries)
+}
+
+/*********** @exclude SYSTEM MESSAGES *******/
+// Message used to send specific sensor commands, such as Mute, Unmute and Override. Mute will stop the sensor from talking until; Unmute, Profile Change, or Program. Override will prevent the sensor from changing the currently selected level until it has timed-out
+message SensorCommandMessage {
+    uint32 command          = 1; // DEPRECATED: Use 'type' instead
+    uint32 index            = 2;
+    SensorCommandType type  = 3;
+}
+
+// Message used to change Profiles. Note that changing the profile will cause the sensors to reset
+message ChangeProfileMessage {
+    uint32 profile  = 1;
+}
+
+// Message used to show information on screen to aid with physical identification
+message IdentifyMessage {
+    uint64 MAC  = 1;
+    uint64 IP   = 2;
+}
+
+// Message to update the device time. Message will be affected by Day Light Savings (If selected) and will refresh currently selected schedules
+message UpdateTimeMessage {
+    TimeClockMessage time  = 1;
+}
+
+// Message used to request device information, such as inputs, lists, sensors, etc
+message ReadDeviceMessage {
+    uint32 profile  = 1;
+    ReadType type   = 2;
+    uint32 index    = 3;
+    uint32 secondary_index = 4; // For more advanced reads (e.g. ExtendedListMessage)
+}
+
+// Message used to send a secure login settings message. AES Encryption Required
+message SecureDeviceSettingsMessage {
+    string payload   = 1; // Encrypted payload of a PB message.
+}
+
+/************ @exclude DALI MESSAGES ************/
+
+// DALI DTR Message structure. 
+message DTRPayloadMessage {
+    repeated uint32 dtr = 1; // For DALI, you can use 2 bytes, for eDALI 3. Format - DTR0 | DTR1 << 8 | DTR2 << 16
+}
+
+// Message to send a DALI command using various DALI frame types.
+message DALIMessage {
+    uint32 line_mask                         = 1; // Binary mask; e.g. selecting line 1 out of 4 looks like 0b0001. For non queries, line_mask can contain multiple valid lines
+    uint32 address                           = 2; // DALI Address
+    oneof action {
+        uint32 frame_25_bit                  = 3; // Older eDALI commands are manufacturer specific, so we have to take a raw value.
+        uint32 frame_25_bit_reply            = 4; // Older eDALI commands can have a reply.
+        DALICommandType command              = 5;
+        CustomDALICommandType custom_command = 6;
+        DALIQueryType query                  = 7;
+        Type8CommandType type8               = 8;
+        uint32 frame_16_bit                  = 11; // Standard DALI Frame data - Don't use arg
+        uint32 frame_16_bit_reply            = 12; // Standard DALI Frame data with reply - Don't use arg
+        uint32 frame_24_bit                  = 13; // Standard 24 Bit DALI Frame data - Don't use arg
+        uint32 frame_24_bit_reply            = 14; // Standard 24 Bit DALI Frame data with reply - Don't use arg
+        Type8QueryType type8_reply           = 15; 
+        DALI24DeviceSetting device24_setting = 16; // Settings for DALI 24 Bit Devices
+    }
+    oneof params {
+        uint32 arg                           = 9;   // Context-dependent value: scene number (0-15), arc level (0-254), or for XY coordinates packed as (X << 16) | Y in a single uint32
+        DTRPayloadMessage dtr                = 10;
+    }
+    DALI24InstanceType instance_type         = 17;  // Instance for 24 bit device - Commands are sent via Type
+    DALI24OpCode op_code                     = 18;  // OpCode for 24 bit device
+    bool send_twice                          = 19;  // Should this command be sent twice on the DALI Line(s)?
+}
+
+// Message reply for DALI Status Flag
+message DALIStatusFlagMessage {
+    repeated DALIStatusType flags  = 1;
+}
+
+// DALI Response is tagged with the line and DALI address. 
+message DALIQueryResponse {
+	// Deprecated Query Method
+    oneof payload {
+        DALIStatusFlagMessage status_flags  = 1;
+        PayloadMessage data                 = 2;
+    }
+	// New Query Method
+	DALIRXStatusFlag dali_flag              = 3;
+	PayloadMessage response_data            = 4;
+}
+
+// DALI Response for Addressing Error
+enum DALIAddressingError {
+    NO_ERROR        = 0; // Device found and Addressed
+    VERIFY          = 1; // Device was found, address was set, but verification failed
+    SEARCH          = 2; // Device was found, issue with long address
+    NO_NEW_DEVICE   = 3; // No device found
+}
+
+// DALI Addressing Type
+enum DALIAddressingType {
+    ADDRESS_NEW      = 0; // Only Address New devices which have their address set to MASK (255)
+    READDRESS_ALL    = 1; // Address everything on the line (Standard or 24 bit) - USE CAREFULLY
+}
+
+// Message to invoke DALI Addressing
+message DALIAddressingMessage {
+    DALIAddressingType type     = 1;            // New or All       
+    bool initialisation         = 2;            // First Address (TRUE) or Next Address (FALSE)
+    uint32 line_mask            = 3;            // Line to Address - Must be singular
+    bool is24Bit                = 4;            // 24 Bit DALI (TRUE) or Standard (FALSE)
+    DALIAddressingError error   = 5;            // Response -> Error while Addressing
+    uint32 index                = 6;            // Response -> Index of Set Address
+}
+
+// Message to invoke DALI remapping
+message DALIRemappingMessage {
+    uint32 from_address   = 1;  // DALI Address to change
+    uint32 to_address     = 2;  // New address for device. If populated, this address will change to the from_address
+    uint32 line_mask      = 3;  // Affected DALI Line
+    bool is24Bit          = 4;  // 24 bit DALI (TRUE) or Standard (FALSE)
+}
+
+message DALIAddressableObject {
+    uint32 line             = 1; // Which DALI Line is this Device on?
+    uint32 address          = 2; // What is the Short Address of this Device?
+}
+
+message DALIIdentifyDuplicatesMessage {
+    uint32 line_mask                                        = 1; // Which DALI Line(s) to check
+    bool is24Bit                                            = 2; // Use 24-bit DALI (DALI v2) or standard 16-bit DALI if FALSE
+    repeated DALIAddressableObject possible_duplicates      = 3; // A collection of DALI Devices which *may* be using duplicated Short Addresses
+}
+
+/************* @exclude DMX MESSAGES *************/
+// Message to send DMX on requested DMX line(s)
+message DMXMessage {
+    uint32 zone                 = 1; // For Spektra (default of 0 is fine if not applicable)
+    uint32 universe_mask        = 2; // Which DMX Universes to apply the values to. Specified as a binary mask. Can be sent to multiple.
+    uint32 channel              = 3; // The actual channel number (not zero-based index)
+    uint32 repeat               = 4; // The number of times to repeat the data given (e.g. start from DMX channel 30 and set the RGB channel values (levels) of the next 3 lights, so repeat would be 3 with 3 levels provided)
+    repeated uint32 level       = 5; // The actual channel values/levels to send
+    uint32 fade_time_by_10ms    = 6; // The DMX Fade Task runs every 10ms, so a value of 25 will fade over 250ms
+}
+
+/************** @exclude RDM MESSAGES ************/
+// Message to send a DMX command with/without a response (Getset)
+message RDMMessage {
+	uint32 universe_mask        = 1;    // Universe Mask - Must be a single universe.
+	uint64 uid                  = 2;    // UID of device to send the message to. Can be Multi/Broadcast
+	uint32 pid                  = 3;    // RDM PID - See Standard
+	uint32 getset               = 4;    // Expects [DMX_RDM_GET_COMMAND = 0x20] or [DMX_RDM_SET_COMMAND = 0x30]
+	uint32 datalength           = 5;    // Length of Data to send
+	repeated uint32 data        = 6;    // Data
+}
+
+// RDM Response message - source UID, PID, datalength and data
+message RDMResponseMessage {
+	uint64 uid              = 1;    // UID of requested device
+	uint32 pid              = 2;    // Message PID
+	uint32 datalength       = 3;    // Length of Data to receive
+	repeated uint32 data    = 4;    // Data
+}
+
+// RDM Discovery Message - Invokes Discovery with reply as RDMDiscoveryReplyMessage. isNext flag allows for more than 128 devices to be discovered in additional messages.
+message RDMDiscoveryMessage {
+    uint32 universe_mask = 1;       // Universe Mask - Must be a single universe
+    bool isNext = 2;                // If true, RDM module will search for additional or 'next' 128 RDM devices. If false (empty), RDM module will re-init search for up to 128 devices
+}
+
+// RDM Discovery Reply with up to 128 devices
+message RDMDiscoveryReplyMessage {
+    uint32 discovery_count = 1;
+    repeated uint64 uid = 2;
+    uint32 error_code = 3;
+}
+
+/************ @exclude SPEKTRA    *************/
+// Message for Spektra Setting Information
+message SpektraSettingMessage {    
+    uint32 zone                                                 = 1; // Determine Spektra zone from 0-9
+    uint32 start_address                                        = 2; // DMX or DALI Start Address. Typically RED on the first fixture.
+    uint32 line_or_universe_mask                                = 3; // Which DALI Line(s) or DMX Universe(s) to control
+    uint32 protocol                                             = 4; // E.g. DMX or DALI
+    uint32 number_of_lights                                     = 5; // Number of DALI or DMX fixtures connected. If more than available channels, the 'consecutive' option can be selected which will use multiple lines, starting from the first line specified above
+    uint32 channels_per_light                                   = 6; // E.g. 4 for RGBW
+    repeated uint32 channel_colours                             = 7; // What colour is assigned to each channel (e.g. Red, Green, etc.)
+    SpektraUnscheduledBehaviourType unscheduled_behaviour       = 8; // 0 = Random colours rotate sequence, 1 = Run default sequence (seq 1)
+	repeated uint32 channel_mapping                             = 9; // Channel mapping for DALI or future DMX virtual 'grouping'
+    LineAddressingType line_addressing                          = 10; // Independent or Consecutive
+	float zone_scale_factor										= 11; // Zone Scale Factor - Float 0 to 1.0f
+}
+
+// Spektra Colour Channel Config Structure
+message SpektraColourConfigMessage {
+    repeated uint32 channel_value = 1;  // Include as many values as there are channels, e.g. [0, 255, 0] would be Green for an RGB light (3 channel values)
+}
+
+// Spektra Sequence Configuration Message. Up to 144 sequences can be stored
+message SpektraSequenceConfigMessage {
+    uint32 index                                        = 1; // Index of sequence - 0 to 143
+    uint32 type                                         = 2; // BLEND / SIMPLE CHASE / SHADOW CHASE / COMET / ROTATE / TWINKLE / BUILD-UP / CRASH / FIREWORKS
+    SpektraTransitionType transition                    = 3; // BLEND / SNAP / FADE_TO_BLACK
+    uint32 fade_time_by_10ms                            = 4; // Correlates to blend transitions
+    uint32 time_per_colour                              = 5; // How long each colour should be shown
+    uint32 time_per_colour_unit                         = 6; // MILLISECONDS / SECONDS / MINUTES / HOURS
+    uint32 time_per_step                                = 7; // How long each sequence type 'animation' takes (e.g. speed of the chase)
+    uint32 time_per_step_unit                           = 8; // MILLISECONDS / SECONDS / MINUTES / HOURS
+    uint32 range                                        = 9; // Number of lights per repeating segment. 0 = no segmentation (all lights as one group). Values > 0 divide lights into groups of this size for pattern repetition
+    repeated uint64 colour                              = 10; // DEPRECATED - Use the 'colours' field (SpektraColourConfigMessage array) instead
+    uint32 is_randomised_type                           = 11; // Will randomly select (from random_types_mask) one of the Sequence Types
+    uint32 random_types_mask                            = 12; // A bitmask of Sequence Types
+    uint32 is_reverse_direction                         = 13; // Animate the sequence in reverse light order
+    uint32 is_cycle_direction                           = 14; // Animate the sequence in alternating light order from forward to reverse
+    string title                                        = 15; // The name of the Sequence
+    bool has_random_colour_order                        = 16; // Randomly pick the next colour out of the chosen colours
+    repeated SpektraColourConfigMessage colours         = 17; // The colours used in the Sequence
+	repeated uint32 args                                = 18; // Function specific arguments * 5
+}
+
+// Message to define Spektra Calendar message. Zone options available in SpektraSettingsMessage to define what will happen if no action is scheduled on a calendar day.
+message SpektraCalendarMessage {
+	SpektraTargetType type  = 1;	    // Spektra Type (e.g. Sequence or Theme)
+	uint32 index            = 2;        // Index (i.e. which Sequence or Theme)
+	repeated bool days      = 3;        // Boolean array to specify when this Target Index is active (up to the number of days in a year)
+    bool isOverride         = 4;        // Boolean isOverride. If override, only run once
+}
+
+// Spektra Calendar Day Structure
+message SpektraCalendarDayMessage {
+    uint32 day_index        = 1;    // Index of this day (0 to 365, 366 days total)
+    SpektraTargetType type  = 2;    // Spektra Type for this day (e.g. Sequence or Theme)
+    uint32 target_index     = 3;    // Index of the specified Type (i.e. which Sequence or Theme)
+    bool isOverride         = 4;    // Boolean isOverride. If override, only run once
+}
+
+// Message to handle Spektra Calendar Read - This is the reply message to the read request
+message SpektraCalendarOverviewMessage {
+    uint32 day_offset                           = 1;    // Offset to start counting days from (0 is the first day of the year)
+    repeated SpektraCalendarDayMessage days     = 2;    // Schedule information for each day; supports up to 90 days per Message
+}
+
+// Message to define Spektra Theme. Up to 16 Themes
+message SpektraThemeConfigMessage {
+    uint32 index                                        = 1;
+    repeated uint64 colour                              = 2; // DEPRECATED - Use the 'colours' field (SpektraColourConfigMessage array) instead
+    string title                                        = 3; // The name of the Theme
+    repeated SpektraColourConfigMessage colours         = 4; // The colours used in the Theme (will repeat colours if less colours than lights)
+}
+
+// Message to request Spektra Data
+message SpektraReadMessage {
+    SpektraTargetType type  = 1;
+    uint32 index            = 2;
+}
+
+// Message to control the Spektra Module
+message SpektraControlMessage {
+    SpektraTargetType type        = 1;  // Spektra Target Type - Sequence/Theme
+    uint32 zone                   = 2;  // Zone (0 to 9) or Zones (255) to control
+    uint32 index                  = 3;  // Index of Action. I.e. Sequence 5
+    SpektraActionType action      = 4;  // Type of Action. Start/Resume/Stop
+}
+
+message SpektraLiveMessage {
+    repeated SpektraTargetType type         = 1;    // Target Type Per Zone (Sequence/Theme etc)
+    repeated uint32 index                   = 2;    // Target Index Per Zone
+    repeated SpektraActionType action       = 3;    // Target Action Per Zone
+    // RAM Data Settings                
+    repeated uint32 step_index              = 4;    // Current Step
+	repeated uint32 step_index_direction    = 5;    // Forwards/Backwards (If Cycling)
+	repeated uint32 colour_index            = 6;    // Current State of Colour Index (Changes over time)
+	repeated uint32 colour_range            = 7;    // Current State of Colour Range (Changes based on Sequence Step)
+    repeated uint32 random_seq_type         = 8;    // Currently Active Random Sequence Type
+    repeated bool zone_active               = 9;    // Flag to show if any channel in this zone is active
+}
+
+/************ @exclude TRANSLATION  *************/
+// Structure to describe the DMX to DALI translation
+message DMXTranslationObject {
+    uint32 line_in               = 1; // DMX IN - Must configure line as DMX IN
+    uint32 line_out              = 2; // DALI OUT
+    uint32 dmx_start_address     = 3; // DMX Start Address
+    uint32 channel_count         = 4; // DMX Count
+    repeated uint32 dali_array   = 5; // DALI Addresses
+    // DEPRECATED: repeated uint32 sent_levels (6)
+    uint32 affected_input        = 7; // Bitmask of affected inputs
+    bool blocking                = 8; // If TRUE (1), the inputs will be ignored if the internal DMX receiving flag is TRUE
+    bool enabled                 = 9; // Translation object is enabled (1) or disabled (0)   
+    uint32 index                 = 10; // Index of Translation Object
+}
+
+// Message to describe the DMX to DALI translation objects. For a 4 line controller, up to 3 objects can be created allowing for single/multi line translation to single/multi line out.
+message DMXProtocolTranslation {
+    repeated DMXTranslationObject object  = 1; // Typically 1 for a 4 Pole device but can be more for 9 Pole eDIDIO
+}
+
+/************ @exclude DIAGNOSTICS *************/
+// Structure of Input state mask when InputStateResponse message is sent. 1 is HIGH, 0 is LOW. GPIO are configured as default HIGH. If not connected, a momentary input will return TRUE (1)
+message InputStateMessage {
+    bool use_mask = 1; // Reply with a mask rather than a list of active inputs.
+}
+
+// Message containing the InputStateMessage mask
+message InputStateResponse {
+    repeated uint32 inputs  = 1; // Contains Inputs that are Low (i.e. currently active)
+    uint32 input_mask       = 2; // Usage is determined by "InputStateMessage: use_mask"
+}
+
+// Message that contains DALI polled levels. Levels are split into pages of 64 values
+message LevelCacheResponse { // DALI/DMX agnostic.
+    repeated uint32 levels  = 1; // Repeated Level array
+    uint32 line             = 2; // Requested Line
+    uint32 page             = 3; // Page of requested information
+}
+
+// Command type for reading or writing user-defined names (aliases) for device elements
+enum AliasCommandType {
+    GET_ALIASES         = 0; // Retrieve stored aliases from the device
+    SET_ALIASES         = 1; // Save new aliases to the device
+}
+
+// User-defined names for profiles (max profile_count entries)
+message ProfileAliases {
+    repeated string profiles    = 1;
+}
+
+// User-defined names for physical inputs (max input_count entries)
+message InputAliases {
+    repeated string inputs    = 1;
+}
+
+// User-defined names for physical outputs (max output_count entries)
+message OutputAliases {
+    repeated string outputs    = 1;
+}
+
+// User-defined names for lists (max list_count entries)
+message ListAliases {
+    repeated string lists    = 1;
+}
+
+// User-defined names for sensors (max 40 entries)
+message SensorAliases {
+    repeated string sensors    = 1;
+}
+
+// User-defined names for DALI input devices (max input_dali_count entries)
+message DaliInputAliases {
+    repeated string dali_inputs    = 1;
+}
+
+// User-defined names for schedules/alarms (max alarm_count entries)
+message ScheduleAliases {
+    repeated string schedules    = 1;
+}
+
+// Container for getting or setting user-defined aliases. Only one alias type can be sent per message.
+message DataAliases {
+    AliasCommandType command            = 1;    // GET_ALIASES to read, SET_ALIASES to write
+    oneof aliases {
+        ProfileAliases profiles         = 2;
+        InputAliases inputs             = 3;
+        OutputAliases outputs           = 4;
+        ListAliases lists               = 5;
+        SensorAliases sensors           = 6;
+        DaliInputAliases dali_inputs    = 7;
+        ScheduleAliases schedules       = 8;
+    }
+}
+
+// Message to request system information. Contains vital information about connected devices configuration capabilities, as well as firmware and hardware version. 
+message DiagnosticSystemInfoResponse {
+    string firmware                = 1; // Firmware Version number
+    string hardware                = 2; // Hardware Version number
+    string error                   = 3; // Any populated Error message
+    uint32 input_count             = 4; // Number of supported Inputs
+    uint32 output_count            = 5; // Number of supported Outputs
+    uint32 ir_count                = 6; // Number of supported IR codes
+    uint32 list_step_count         = 7; // Number of supported List Steps
+    uint32 list_count              = 8; // Number of supported Lists
+    uint32 alarm_count             = 9; // Number of supported Alarms (Schedules)
+    uint32 burnin_count            = 10; // Number of supported Burn-ins
+    uint32 spektra_seq_count       = 11; // Number of supported Spektra Sequences
+    uint32 spektra_seq_step_count  = 12; // Number of supported Spektra Sequence Steps
+    uint32 spektra_theme_count     = 13; // Number of supported Spektra Themes
+    uint32 spektra_static_count    = 14; // Number of supported Spektra Static Colours
+    uint32 proto_version           = 15; // Protocol version = ProtocolVersion_PROTOCOL_VERSION_CURRENT,
+                                         // byte-packed 0x00_MM_mm_PP (e.g. 0x010301 = 1.3.1)
+    uint32 line_count              = 16; // Number of supported Control Lines (for DMX, DALI)
+    repeated LineType lines        = 17; // Denotes what control type is assigned to each line (e.g. DMX, DALI)
+    uint32 profile_count           = 18; // Number of supported Profiles
+    uint32 preset_code_count       = 19; // Number of supported Preset Codes
+    uint32 user_level_count        = 20; // Number of supported User Levels
+    uint32 dmx_to_dali_count       = 21; // Number of supported DMX to DALI Translations 
+    uint32 spektra_zone_count      = 22; // Number of supported Spektra Zones
+	uint32 logic_count			   = 23; // Number of supported Logic Mappings
+	uint32 input_dali_count 	   = 24; // Number of supported DALI Inputs
+    string vendor_id               = 25; // Vendor ID - "Control Freak"
+    uint32 selected_profile        = 26; // Currently Selected Profile
+    string bootloader              = 27; // Bootloader Version number (if applicable)
+    string commit_hash             = 28; // Git commit hash from the build system
+    string build_date              = 29; // Build date/time string (e.g. "Apr  8 2026 14:30:00")
+    bool   has_confidentiality_key = 30; // TRUE if the device can accept an encrypted (V3) firmware image. Lets the updater gate the V3 option. Older firmware omits it -> decodes as false.
+}
+
+// Request a diagnostic response message of a given type.
+message DiagnosticMessage {
+    DiagnosticMessageType type  = 1;
+    uint32 page                 = 2; // Allow paging of results, eg. 32 DMX levels per page, 16 pages.
+    uint32 line                 = 3; // If a line/DMX universe needs to be indicated it can go here.
+}
+
+/**************** @exclude ADMIN ***************/
+// Message to get or set Admin Properties in reference to project information. 
+message AdminProjectPropertiesMessage {
+    string device_name              = 2; // As shown on the Network (in Spektra/Configurator Discovery)
+    string project_name             = 3; // For project documentation
+    float longitude                 = 4; // For astronomical calculations (e.g. sunrise/sunset)
+    float latitude                  = 5; // For astronomical calculations (e.g. sunrise/sunset)
+    float local_offset              = 6; // For astronomical calculations (e.g. sunrise/sunset)
+    bool daylight_savings           = 7; // For astronomical calculations (e.g. sunrise/sunset)
+	uint32 daylight_savings_start   = 8; // Can be used to state when DST is active from
+	uint32 daylight_savings_end     = 9; // Can be used to state when DST is active to
+    uint32 poll_active              = 10; // Should the device be polling the DALI line to cache arc levels. If not 0, it is the polling interval in seconds
+}
+
+// Message to get or set Admin Properties in reference to the device configuration
+message AdminConfigStatusMessage {
+	repeated uint32 list_status = 1;				// State of each List (DISABLED / ENABLED / LOOPING)
+	repeated uint32 burn_in_status = 2;				// State of each Burn-in (RUNNING / NOT RUNNING)
+	uint32 alarm_status = 3;						// Currently Selected Alarm (i.e. 'next Alarm')
+	TimeClockMessage alarm_time_from_reg = 4;		// Time for next Alarm as per RTC Register
+	repeated uint32 sensor_status = 5;				// State of each DALI Sensor (IDLE / DISABLED / WARNING / OCCUPANCY)
+}
+
+// Message to get or set Admin Properties in reference to the network connection. Will require a device reboot to update - Used with AdminMessage
+message AdminNetworkPropertiesMessage {
+    bool DHCP           = 1; // Should DHCP be used? If False, the static IP will be used instead
+    string IP           = 2; // A static IP to use if DHCP is False
+    string MAC          = 3; // The MAC Address of this Device
+    string gateway      = 4; // The Gateway IP for the network this Device is on
+	string NTPServer    = 5; // The NTP Server address from RTC updates over the network
+	bool NTP            = 6; // Should NTP be used to keep the RTC up-to-date via network requests
+    string error        = 7; // Error or Status Message 32 char
+    uint32 NTPTimeout   = 8; // Timeout in seconds for NTP Retry
+    string subnet       = 9; // The Subnet if set by Static IP
+    string DNS_Primary  = 10;   // Primary DNS
+    string DNS_Secondary = 11;  // Secondary DNS
+}
+
+// Message to set the DNS Server - Used with AdminMessage
+message AdminDNSServersMessage {
+    string DNS_Primary      = 1; // Primary DNS
+    string DNS_Secondary    = 2; // Secondary DNS
+}
+
+// Message to set the Type of Controller lines - Used with AdminMessage
+message AdminControllerLinesMessage {
+    repeated LineType lines     = 1; // Used to set the control type on each control line (e.g. DMX / DALI)
+}
+
+// Message to get device temperature and battery - Used with AdminMessage
+message AdminDeviceStatusMessage {
+    float temperature   = 1; // The current device chip temperature
+    float battery       = 2; // The current battery voltage (3.3V battery)
+}
+
+// Message to enable/disable the Secure Login functionality
+message AdminSecureLoginMessage {
+    string username         = 1; // Which username to login as ("control" / "config" / "admin"; 3rd party vendors may have a built-in alias for the admin role)
+    string cnonce           = 2; // The nonce generated by the client attempting to login
+    repeated uint32 hash    = 3; // The login response digest, as 32 repeated byte (0-255) elements (decoded as raw bytes).
+}
+
+// Which role a per-role login secret belongs to. Hierarchical clearance: ADMIN includes CONFIG includes CONTROL.
+enum AuthRole {
+    ROLE_CONTROL = 0; // Drive outputs, run sequences/scenes, read state/diagnostics
+    ROLE_CONFIG  = 1; // + edit inputs/schedules/sensors/lists/logic/alarms/addressing
+    ROLE_ADMIN   = 2; // + network/firmware/provisioning/secure-session/resets/accounts
+}
+
+// Provisions a role's login secret. Used with AdminMessage (USER_ACCOUNT, SET, ADMIN clearance).
+// Write-only: the device never returns a secret. An all-zero secret clears (un-provisions) that role.
+message AdminUserAccountMessage {
+    AuthRole role   = 1; // Which role's secret to set
+    bytes secret    = 2; // 32-byte login secret (all-zero = clear/UNSET)
+}
+
+// Message to set the DALI sensor messaging type (24 or 25 bit DALI)  - Used with AdminMessage
+message AdminDALISensorTypeMessage {
+    DALISensorType type     = 1; // Which type of eDALI will the eDIDIO use to decode & encode Sensor packets?
+}
+
+// DMX512 timing modes as defined by ESTA for Relaxed DMX Timing. Affects refresh rate and compatibility with fixtures
+enum DMXTimingMode {
+    DMX_TIMING_FAST   = 0;      // Fastest refresh rate, may have compatibility issues with some fixtures
+    DMX_TIMING_MEDIUM = 1;      // Balanced timing for most fixtures
+    DMX_TIMING_SLOW   = 2;      // Slower timing for maximum fixture compatibility
+    DMX_TIMING_NORMAL = 3;      // Standard DMX512 timing per ESTA specification
+}
+
+// Global DMX Timing
+message AdminDMXGlobalTimingConfig {
+    DMXTimingMode mode = 1; // Applies to all lines
+}
+
+// Per-line DMX output configuration
+message AdminDMXLineParameters {
+    uint32 line_index = 1;                    // DMX line / universe index (0-based)
+    uint32 output_slot_count = 2;             // Number of DMX slots to transmit (1-512)
+    bool use_16bit_output = 3;                // If true, use 16-bit resolution (pairs adjacent slots for fine/coarse control)
+    bytes dmx_slot_mapping_raw = 4;           // Optional: Custom fixture slot remapping. Value of 513 indicates unused slot
+}
+
+// Per-task stack accounting. One entry per FreeRTOS task currently running.
+// stack_hwm_bytes is the canonical "free bytes at worst since the task started"
+// reported by uxTaskGetStackHighWaterMark(); on Cortex-M the underlying counter
+// is words (4-byte), already multiplied here for client convenience.
+message TaskMemoryInfo {
+    string name                  = 1;  // FreeRTOS task name (configMAX_TASK_NAME_LEN-1 chars max)
+    uint32 stack_size_bytes      = 2;  // Allocated stack region in bytes
+    uint32 stack_hwm_bytes       = 3;  // Free bytes at worst since task start (lower = more used)
+    uint32 stack_used_peak_bytes = 4;  // Convenience: stack_size_bytes - stack_hwm_bytes
+    uint32 stack_min_hwm_bytes   = 5;  // Lowest HWM ever observed by the firmware's own periodic sampler (0 if not separately tracked for this task)
+    uint32 instance_index        = 6;  // Disambiguator for dynamic-instance tasks (TCP/TLS clients); 0 for singletons
+    uint32 priority              = 7;  // Current FreeRTOS priority
+}
+
+// Memory diagnostics snapshot. Returned in response to AdminMessage{GET, MEMORY_DIAGNOSTICS}.
+// All byte counts are bytes (not FreeRTOS "words"). uptime_seconds is included so
+// the client can judge whether HWMs have had enough wall time to converge.
+message AdminMemoryDiagnosticsMessage {
+    repeated TaskMemoryInfo tasks    = 1;  // Live tasks only (NULL handles skipped)
+    uint32 task_count                = 2;  // Length of tasks (mirror for clients that don't auto-count)
+
+    // System/MSP stack (the stack used before scheduler start + by ISRs).
+    // HWM derived from a stack-painting scan.
+    uint32 sys_stack_size_bytes      = 3;
+    uint32 sys_stack_hwm_bytes       = 4;  // Free bytes at worst this run
+    uint32 sys_stack_hwm_prev_bytes  = 5;  // Free bytes captured before this reboot
+
+    // Linker-section static usage (computed from _sdata/_edata/_sbss/_ebss/_enoinit/_sccmram/_eccmram/_estack).
+    uint32 sram_total_bytes          = 6;  // 128 KB total
+    uint32 sram_static_bytes         = 7;  // .data + .bss + .noinit
+    uint32 ccmram_total_bytes        = 8;  // 64 KB total
+    uint32 ccmram_static_bytes       = 9;  // Sections marked CCMRAM
+
+    uint32 uptime_seconds            = 10; // Seconds since boot
+
+    // System-stack peak captured immediately before vTaskStartScheduler().
+    // Compare against sys_stack_hwm_bytes to disambiguate pre-scheduler
+    // boot-init depth vs. post-boot ISR growth: equal => boot was the peak.
+    uint32 boot_sys_stack_hwm_bytes  = 11; // Free bytes at scheduler start (lower = more used)
+
+    // TLS static memory pool. 0 in builds without TLS support.
+    // tls_pool_hwm_bytes is the peak first-fit allocation offset, NOT peak
+    // concurrent in-use bytes — fragmentation can push real-world need higher.
+    uint32 tls_pool_size_bytes       = 12; // total TLS pool size (24576 bytes when enabled)
+    uint32 tls_pool_hwm_bytes        = 13; // Peak byte offset ever allocated
+}
+
+// Resolved link state. UNKNOWN until the first link-up after boot.
+enum EthLinkState {
+    ETH_LINK_UNKNOWN = 0;
+    ETH_LINK_DOWN    = 1;
+    ETH_LINK_UP      = 2;
+}
+
+// Resolved duplex. UNKNOWN means the PHY has not yet published a valid
+// HCDSPEED (auto-neg in progress, or AN disabled + no link, or AUTODONE
+// timeout occurred).
+enum EthDuplexMode {
+    ETH_DUPLEX_UNKNOWN = 0;
+    ETH_DUPLEX_HALF    = 1;
+    ETH_DUPLEX_FULL    = 2;
+}
+
+// How the current link speed/duplex was decided. PARALLEL_DETECTED is the
+// duplex-mismatch smoking gun: it means the link partner did not transmit
+// FLP bursts, so the PHY had to detect speed only and (per IEEE 802.3)
+// pick half-duplex. If the partner is actually configured full-duplex,
+// every collision they see is "late" and TCP loses retransmits.
+enum EthNegotiationMethod {
+    ETH_NEG_UNKNOWN          = 0; // Not yet determined (no link, fill-time read happened pre-link)
+    ETH_NEG_AN_DISABLED      = 1; // BMCR.AN_EN == 0 (forced speed/duplex)
+    ETH_NEG_AN_IN_PROGRESS   = 2; // AN_EN set but BMSR.AN_COMPLETE not yet
+    ETH_NEG_AN_COMPLETED     = 3; // Clean auto-negotiation with a peer that also auto-negotiates
+    ETH_NEG_PARALLEL_DETECT  = 4; // ANER.PAR_DETECT_FAULT set OR LP_AN_ABLE==0 with link up
+}
+
+// Reason a record was appended to the ring buffer.
+enum EthLinkEventKind {
+    ETH_EVT_BOOT_INIT        = 0; // Snapshot taken at end of lan8720Init()
+    ETH_EVT_LINK_UP          = 1; // Edge: link came up
+    ETH_EVT_LINK_DOWN        = 2; // Edge: link went down
+    ETH_EVT_AN_COMPLETE      = 3; // BMSR.AN_COMPLETE latched in ISR
+    ETH_EVT_PAR_DETECT_FAULT = 4; // ANER.PAR_DETECT_FAULT observed
+    ETH_EVT_AUTODONE_TIMEOUT = 5; // Reserved for future bounded-poll fix; not emitted yet
+    ETH_EVT_INVALID_HCDSPEED = 6; // PSCSR.HCDSPEED resolved to a reserved value
+}
+
+// One slot of the per-minute error histogram. Counters are deltas for the
+// minute identified by minute_index (uptime_seconds / 60). The bucket
+// labelled "current_minute_index" in the parent message is still
+// accumulating; older buckets are closed and frozen.
+message EthErrorHistogramBucket {
+    uint32 minute_index    = 1; // Uptime-minute when this bucket was opened
+    uint32 secr_count      = 2; // PHY SECR ticks during this minute
+    uint32 crc_count       = 3; // MAC RX CRC errors during this minute
+    uint32 miss_count      = 4; // DMA controller-side missed frames during this minute
+    uint32 rx_good_count   = 5; // MAC RX good frames during this minute — context for the error rates
+    uint32 tx_good_count   = 6; // MAC TX good frames during this minute — context for the error rates
+}
+
+// One row of the link-event ring buffer. Fixed-stride for simple parsing.
+// PHY register fields are uint32 only to widen nanopb varint encoding —
+// real values fit in 16 bits.
+message EthLinkEventRecord {
+    uint32 uptime_seconds          = 1; // When the event was recorded (xTaskGetTickCount / configTICK_RATE_HZ)
+    EthLinkEventKind kind          = 2;
+    uint32 resolved_speed_mbps     = 3; // 0 / 10 / 100 — 0 means UNKNOWN at the time of the event
+    EthDuplexMode resolved_duplex  = 4;
+    uint32 bmsr                    = 5; // BMSR  (PHY reg 0x01) at event time
+    uint32 anlpar                  = 6; // ANLPAR(PHY reg 0x05) — what link partner advertised; 0x0000 => partner did not AN
+    uint32 aner                    = 7; // ANER  (PHY reg 0x06) — bit 4 PAR_DETECT_FAULT, bit 0 LP_AN_ABLE
+    uint32 pscsr                   = 8; // PSCSR (PHY reg 0x1F) — bit 12 AUTODONE, bits 4:2 HCDSPEED
+}
+
+// Returned in response to AdminMessage{GET, ETHERNET_DIAGNOSTICS}.
+// All PHY register fields are live reads via MDIO at the moment of the
+// request (except SECR — symbol error count is self-clearing on read and
+// is accumulated in phy_symbol_errors_total).
+//
+// MAC counters are the Ethernet MAC's MMC registers (32-bit, not self-clearing by
+// default on this build). They are absolute since power-on; clients should
+// take two snapshots and diff to get a rate. They WILL wrap eventually
+// (~8 hours at 100 Mbps line-rate of 64-byte frames).
+message AdminEthernetDiagnosticsMessage {
+    // ===== Resolved live link state =====
+    EthLinkState link_state                = 1;
+    uint32 link_speed_mbps                 = 2; // 0 / 10 / 100
+    EthDuplexMode duplex_mode              = 3;
+    EthNegotiationMethod neg_method        = 4; // Derived from BMCR/BMSR/ANER at fill-time
+    bool partner_an_capable                = 5; // ANER.LP_AN_ABLE
+    bool partner_adv_full_duplex           = 6; // ANLPAR.100BTX_FD || ANLPAR.10BT_FD
+    bool partner_adv_100mbps               = 7; // ANLPAR.100BTX_FD || ANLPAR.100BTX_HD
+    bool autodone                          = 8; // PSCSR.AUTODONE
+    bool use_auto_negotiation_setting      = 9; // the user's auto-negotiation setting (what the user toggled)
+
+    // ===== PHY register snapshot (live read via MDIO) =====
+    uint32 bmcr                            = 20; // 0x00 — AN_EN, SPEED_SEL, DUPLEX, RESTART_AN
+    uint32 bmsr                            = 21; // 0x01 — LINK_STATUS, AN_COMPLETE, capabilities
+    uint32 phyid1                          = 22; // 0x02 — PHY ID 1 (identity high)
+    uint32 phyid2                          = 23; // 0x03 — PHY ID 2 (identity low)
+    uint32 anar                            = 24; // 0x04 — what WE advertised
+    uint32 anlpar                          = 25; // 0x05 — what PARTNER advertised
+    uint32 aner                            = 26; // 0x06 — PAR_DETECT_FAULT, LP_AN_ABLE
+    uint32 mcsr                            = 27; // 0x11 — EDPWRDOWN, ENERGYON
+    uint32 scsir                           = 28; // 0x1B — AMDIX, polarity
+    uint32 pscsr                           = 29; // 0x1F — AUTODONE, HCDSPEED
+
+    // ===== Ethernet MAC MMC counters (absolute, may wrap) =====
+    uint32 mac_tx_good_frames              = 40; // ETH_MMCTGFCR    — successfully transmitted frames
+    uint32 mac_tx_single_collision         = 41; // ETH_MMCTGFSCCR  — transmitted after one collision (HD only; non-zero on HD link is normal, non-zero on FD link => mismatch)
+    uint32 mac_tx_multi_collision          = 42; // ETH_MMCTGFMSCCR — transmitted after >1 collisions (HD only; very strong mismatch indicator on a FD partner)
+    uint32 mac_rx_good_frames              = 43; // ETH_MMCRGUFCR   — received good unicast frames
+    uint32 mac_rx_crc_errors               = 44; // ETH_MMCRFCECR   — CRC errors (cable, EMI, or duplex mismatch on FD side)
+    uint32 mac_rx_alignment_errors         = 45; // ETH_MMCRFAECR   — frame alignment / dribble errors
+    uint32 dma_missed_frames_app           = 46; // ETH_DMAMFBOCR.MFA[27:17] — drops because the descriptor list was full (RX backlog)
+    uint32 dma_missed_frames_controller    = 47; // ETH_DMAMFBOCR.MFC[15:0]  — drops because the RX FIFO was full
+
+    // ===== Accumulated since boot (PHY self-clears these on read) =====
+    uint64 phy_symbol_errors_total         = 50; // Sum of PHY SECR (reg 0x1A) reads
+
+    // ===== Driver-level event counters =====
+    uint32 link_up_count                   = 60; // How many times the link came up since boot
+    uint32 link_down_count                 = 61; // How many times the link dropped
+    uint32 par_detect_count                = 62; // Times ANER.PAR_DETECT_FAULT was latched
+    uint32 invalid_hcdspeed_count          = 63; // Times PSCSR.HCDSPEED came back as a reserved value (the invalid-operation-mode warning path)
+    uint32 autodone_timeout_count          = 64; // Times the post-link-event AUTODONE wait expired (currently a 2.5 s budget)
+
+    // SECR (PHY reg 0x1A) is a 16-bit self-clearing counter. If the symbol
+    // error rate exceeds 65535 between successive drains, the register
+    // saturates at 0xFFFF and we lose count fidelity for the overflow. This
+    // counter increments every time we drain SECR and find exactly 0xFFFF —
+    // i.e. every time we know we under-counted. A non-zero value means the
+    // phy_symbol_errors_total / per-minute histogram are LOWER BOUNDS only.
+    uint32 secr_saturation_count           = 65;
+
+    uint32 uptime_seconds                  = 70;
+
+    // ===== Burst tracking =====
+    // Largest single-drain SECR value ever observed since boot. The
+    // diagnostics module drains SECR on a periodic timer (~4 Hz / 250 ms by
+    // default) AND on every PHY poll tick (~1 Hz).
+    // The field name is kept for wire compatibility; treat it as
+    // "peak_secr_per_drain". If this approaches 0xFFFF (= 65535) the chip
+    // saturated the counter and we lost precision — see secr_saturation_count.
+    uint32 peak_secr_per_tick              = 75;
+    // SECR count accumulated in the CURRENTLY-OPEN minute bucket (i.e. the
+    // bucket that will eventually be appended to `buckets` when the minute
+    // rolls). 0 to ~10s for a brand-new minute, up to ~1.8M/min at observed
+    // peak rates.
+    uint32 current_minute_secr             = 76;
+    // Uptime-minute index of the currently-open bucket — clients use this
+    // to know which minute the partial `current_minute_secr` belongs to.
+    uint32 current_minute_index            = 77;
+
+    // ===== Ring buffer of recent link-state transitions, oldest -> newest =====
+    repeated EthLinkEventRecord events     = 80;
+
+    // ===== Per-minute error histogram, oldest -> newest =====
+    // Each bucket is a closed (finalised) 1-minute window. The currently
+    // accumulating minute is exposed via current_minute_* above. Up to 30
+    // minutes of history so you can leave the device running and see
+    // patterns (thermal drift, time-of-day EMI, traffic correlation).
+    repeated EthErrorHistogramBucket buckets = 85;
+
+    // ===== Full Ethernet PHY register dump (live MDIO sweep) =====
+    // 32 entries indexed by PHY register address (0..31). Reserved/unused
+    // registers will read back as 0 (or whatever the chip drives onto MDIO
+    // for those addresses). Included primarily for forensic comparison
+    // against the PHY datasheet when needed.
+    repeated uint32 phy_regs_all           = 90;
+}
+
+// Raw Phase-1 GPIO classification — TX/RX as input with internal pull-down, EN as
+// output low (DMX transceiver receive mode), 16 samples OR-folded over ~8 ms.
+//
+// Multi-sampling matters: a single read of RX on a line being actively driven by an
+// external DMX master can land inside a BREAK or 0-bit and falsely report EMPTY.
+// OR-folding 16 samples across one DMX frame's worth of time guarantees we observe
+// at least one MARK state if the line is active.
+//
+// Why each pattern occurs:
+//   EMPTY:     nothing fitted, internal pull-downs win on both pins
+//   DALI_LIKE: TX pulled to ~2 V by the on-board 3V3 → opto-LED → R4 (390R) bleed-through
+//              regardless of DALI bus state. RX may be 0 or 1 depending on whether the
+//              DALI bus is energised — TX HIGH alone is enough to classify.
+//   DMX_LIKE:  DMX line transceiver receiver enabled (EN=LOW) drives R output push-pull HIGH via the
+//              transceiver's internal fail-safe biasing on undriven A/B. TX stays LOW
+//              because the D input is high-Z CMOS.
+//              CAUTION: this pattern is ALSO matched by a DALI daughterboard whose TX
+//              bleed-through path is broken (R4 open, TX-opto LED open, daughterboard
+//              3V3 lost on the TX-side feed) while R2's RX pull-up is still alive — that
+//              case is what `dmx_toggle` exists to disambiguate.
+enum GpioPhase1Result {
+    GPIO_PHASE1_UNKNOWN   = 0;
+    GPIO_PHASE1_EMPTY     = 1; // (TX, RX) = (0, 0)
+    GPIO_PHASE1_DALI_LIKE = 2; // (TX, RX) = (1, X)
+    GPIO_PHASE1_DMX_LIKE  = 3; // (TX, RX) = (0, 1)
+}
+
+// DALI active self-echo probe (~13 ms total, GPIO-only). Drives TX HIGH (DALI idle),
+// settles 10 ms (covers worst-case ~9 ms DALI bus rise time on fully-loaded buses),
+// reads RX. Then TX LOW for ~200 µs (active sink — well below any DALI receiver's
+// frame-start threshold so no devices misinterpret it) and reads RX. Then TX HIGH
+// again and reads RX. A healthy DALI board on a powered (~16 V) bus shows the
+// sequence (rx_idle=0, rx_during=1, rx_after=0) because the receive opto's
+// conduction tracks bus voltage.
+//
+// PASS is a UNIQUELY POSITIVE identification of a healthy DALI loop on a powered bus
+// — no other fitted hardware can produce this echo pattern. Always run regardless of
+// Phase 1's classification so cross-checking can catch P1 misclassifications.
+//
+// FAIL does NOT localise to a specific failure — could be a damaged DALI board, an
+// unpowered/disconnected DALI bus, a shorted bus, or a non-DALI daughterboard.
+enum DaliEchoResult {
+    DALI_ECHO_UNKNOWN = 0;
+    DALI_ECHO_PASS    = 1;
+    DALI_ECHO_FAIL    = 2;
+}
+
+// DMX EN-toggle probe (~7 ms total, GPIO-only). Holds TX OUTPUT HIGH (so if the driver
+// were enabled it would output DMX idle A=HIGH/B=LOW — minimally disruptive), RX as
+// input pull-down. EN goes LOW (receiver enabled) then HIGH (receiver disabled, driver
+// briefly enabled for ~10 µs) then back LOW. Only a real DMX transceiver R output transitions
+// from push-pull HIGH → high-Z in this sequence. A DALI board's RX is held HIGH by R2
+// (4k7 to on-board 3V3) regardless of EN, so it gets stuck HIGH on both reads. Empty
+// slot reads (0, 0).
+//
+// PASS is a UNIQUELY POSITIVE identification of a working DMX receiver — no other
+// fitted hardware can produce the high→high-Z transition. Always run regardless of
+// Phase 1's classification so cross-checking can catch P1 misclassifications.
+//
+// SKIPPED happens when RDM is in flight on this line OR when RX was observed toggling
+// (active external master) during a brief pre-check. Skipping protects against driving
+// the line into contention with an external master mid-frame.
+enum DmxToggleResult {
+    DMX_TOGGLE_UNKNOWN         = 0;
+    DMX_TOGGLE_SKIPPED         = 1; // RDM busy on this line, or external traffic observed
+    DMX_TOGGLE_PASS            = 2; // (rx_low=1, rx_high=0) — confirmed DMX receiver
+    DMX_TOGGLE_FAIL_STUCK_HIGH = 3; // (rx_low=1, rx_high=1) — something pulls RX HIGH regardless of EN (most-likely DALI R2)
+    DMX_TOGGLE_FAIL_STUCK_LOW  = 4; // (rx_low=0, rx_high=0) — no driver on RX
+    DMX_TOGGLE_FAIL_INVERTED   = 5; // (rx_low=0, rx_high=1) — unexpected; investigate hardware
+}
+
+// DMX passive listen (~50 ms). Counts USART RXNE/FE/ORE events while EN=LOW. Only runs
+// when the line's USART is already enabled (i.e. configured DMX or DMX_IN) — for other
+// configurations the USART for that slot is not clocked, and reconfiguring it from a
+// diagnostic call would be invasive.
+enum DmxListenResult {
+    DMX_LISTEN_UNKNOWN = 0;
+    DMX_LISTEN_SKIPPED = 1; // USART not configured for this line, or RDM busy
+    DMX_LISTEN_QUIET   = 2; // Zero events in window — line is electrically clean
+    DMX_LISTEN_ACTIVE  = 3; // Events seen — external DMX master OR transceiver fault (use with verdict to disambiguate)
+}
+
+// Synthesized verdict from (configured_as, gpio_phase1, dali_echo, dmx_toggle, dmx_listen).
+// Verdict logic prefers the strongest positive signal:
+//   1. dali_echo == PASS  → DALI confirmed (regardless of P1)
+//   2. dmx_toggle == PASS → DMX confirmed (regardless of P1)
+//   3. neither PASS       → fall back to P1 + the FAIL/SKIPPED context
+// This protects against P1 misclassifications — e.g. a damaged DMX board whose TX pin
+// leaks high reads as DALI_LIKE under P1, but the EN-toggle correctly identifies it.
+//
+// Failure modes deliberately NOT distinguished by this verdict (firmware can't see them
+// from the three pins available): DALI bus open vs. shorted; DALI cable mis-wired into
+// a DMX board (looks like quiet DMX); DMX cable mis-wired into a DALI board (looks
+// like unpowered DALI bus); DMX board with lost on-board 3V3 (looks like EMPTY unless
+// the operator configured the slot as DMX, in which case EMPTY_OR_UNPOWERED_BOARD).
+enum LineDiagnosticVerdict {
+    LINE_VERDICT_UNKNOWN                       = 0;
+    LINE_VERDICT_EMPTY                         = 1;  // Slot empty; matches configured EMPTY/AUTO. Nothing to investigate.
+    LINE_VERDICT_EMPTY_OR_UNPOWERED_BOARD      = 2;  // Operator configured DALI/DMX but all probes returned negative. Either no board fitted, on-board 3V3 lost, or transceiver IC dead.
+    LINE_VERDICT_DALI_OK_BUS_POWERED           = 3;  // DALI board + DALI bus both verified healthy by echo.
+    LINE_VERDICT_DALI_PRESENT_BUS_UNVERIFIED   = 4;  // Phase 1 saw DALI TX bleed-through but the echo failed. Bus is open / shorted / not energised — connect a DALI PSU and retry.
+    LINE_VERDICT_DMX_OK                        = 5;  // DMX board confirmed via EN-toggle, line quiet (or USART not yet running).
+    LINE_VERDICT_DMX_PRESENT_ACTIVE_TRAFFIC    = 6;  // DMX board confirmed via EN-toggle, external traffic seen on bus.
+    LINE_VERDICT_BOARD_PRESENT_TYPE_AMBIGUOUS  = 7;  // Phase 1 looked DMX-like but the EN-toggle said NOT a DMX receiver and the DALI echo also failed. Most-likely a TX-broken DALI board (R4 / TX opto LED open) with R2 still pulling RX up. Replace daughterboard.
+    LINE_VERDICT_MISCONFIGURED_LIKELY_DMX      = 8;  // Configured type ≠ DMX, but EN-toggle confirms a DMX board is fitted. Reconfigure to DMX.
+    LINE_VERDICT_MISCONFIGURED_LIKELY_DALI     = 9;  // Configured type ≠ DALI, but DALI echo confirms a healthy DALI board on a powered bus. Reconfigure to DALI.
+    LINE_VERDICT_MISCONFIGURED_OTHER           = 10; // Configured ≠ probed and no active probe gave a confident positive identification. Investigate cabling + board fit.
+    LINE_VERDICT_FAULT                         = 11; // Probes returned a pattern that does not match any healthy configuration (e.g. P1 says DALI_LIKE but every other probe disagrees). Likely a damaged daughterboard.
+}
+
+enum LineDiagnosticConfidence {
+    LINE_CONFIDENCE_UNKNOWN = 0;
+    LINE_CONFIDENCE_LOW     = 1; // Verdict relies on inference the firmware cannot directly verify (e.g. EMPTY vs unpowered board)
+    LINE_CONFIDENCE_MEDIUM  = 2; // Verdict is consistent with the probes but one or more came back SKIPPED / ambiguous
+    LINE_CONFIDENCE_HIGH    = 3; // All probes that ran agree, in a pattern that uniquely identifies the verdict
+}
+
+// One per physical line slot. All four raw probe results are reported alongside the
+// synthesized verdict so a UI can show "why" the verdict was reached.
+message LineDiagnosticEntry {
+    uint32 line_index                   = 1; // 0-based; 0..LINE_COUNT-1 for the current hardware variant
+    LineType configured_as              = 2; // The configured type for this line
+
+    // ---- Raw probe outputs ----
+    GpioPhase1Result gpio_phase1        = 3; // Phase-1 (TX, RX) classification after multi-sample OR-fold
+    DaliEchoResult dali_echo            = 4; // Active DALI self-echo (always run)
+    DmxToggleResult dmx_toggle          = 5; // EN-toggle DMX-receiver presence test (always run unless RDM busy or external traffic observed)
+    DmxListenResult dmx_listen          = 6; // Passive ~50 ms USART event count (only when line's USART is enabled)
+
+    // ---- Synthesized verdict ----
+    LineDiagnosticVerdict verdict       = 7; // Highest-information verdict; see enum comment
+    LineDiagnosticConfidence confidence = 8; // How much to trust `verdict`
+}
+
+// Per-line diagnostic snapshot. Returned in response to AdminMessage{GET, LINE_DIAGNOSTICS}.
+// All four probes run on every line (with safety-skip on P3/P4 if RDM is active or
+// external traffic is detected). Per-line wall time: ~33 ms typical, ~88 ms when P4
+// runs. Total message wall time: bounded under 400 ms on any hardware variant. Not
+// safe to spam from a hot loop.
+message AdminLineDiagnosticsMessage {
+    repeated LineDiagnosticEntry lines = 1; // One entry per physical line slot, in line-index order
+    uint32 uptime_seconds              = 2; // Seconds since boot — context for the probe (e.g. very-recent boot may not have stable bus state yet)
+}
+
+// ===== TIME DIAGNOSTICS =====
+
+// Which clock drives the RTC. UNKNOWN should not appear in a healthy device.
+enum ClockSource {
+    CLOCK_SOURCE_UNKNOWN = 0;
+    CLOCK_SOURCE_LSE     = 1; // 32.768 kHz external crystal (default)
+    CLOCK_SOURCE_LSI     = 2; // Internal RC oscillator (less accurate fallback)
+}
+
+// Outcome of the software LSE-vs-HSE ppm measurement.
+enum ClockMeasurementStatus {
+    LSE_MEAS_NOT_RUN           = 0; // Never measured (default after boot, before first probe)
+    LSE_MEAS_OK                = 1; // Window completed cleanly
+    LSE_MEAS_LSE_DEAD          = 2; // SSR never advanced — crystal silent
+    LSE_MEAS_HSE_UNSTABLE      = 3; // HSE drifted during the window — measurement invalid
+    LSE_MEAS_INSUFFICIENT_TIME = 4; // dwt_delta too small to resolve
+}
+
+// Origin of the most-recent RTC write. Used by clients to distinguish drift
+// (no recent write) from operator action (recent NETWORK_ADMIN / MENU write).
+enum TimeSetSource {
+    TIME_SET_NEVER           = 0; // Clock has never been set since the last battery loss
+    TIME_SET_FACTORY         = 1; // Reserved — not currently emitted
+    TIME_SET_MENU            = 2; // Set via the on-device menu / debug helper
+    TIME_SET_NETWORK_LEGACY  = 3; // UpdateTimeMessage (top-level update_time)
+    TIME_SET_NETWORK_ADMIN   = 4; // AdminPropertyType DEVICE_TIME SET
+    TIME_SET_NTP             = 5; // NTP success path
+    TIME_SET_BACNET          = 6; // BACnet TimeSync (local or UTC)
+    TIME_SET_DST_ADJUST      = 7; // Automatic DST hour-boundary fixup
+}
+
+// Inferred from start_day / end_day of the configured DST window.
+enum DstHemisphere {
+    DST_HEMISPHERE_UNKNOWN  = 0; // DST disabled in config
+    DST_HEMISPHERE_NORTHERN = 1; // start_day < end_day (DST contained within one calendar year)
+    DST_HEMISPHERE_SOUTHERN = 2; // start_day > end_day (DST wraps across the new year)
+}
+
+// What the next DST transition will do.
+enum DstTransitionType {
+    DST_TRANSITION_NONE  = 0; // DST disabled or no transition scheduled
+    DST_TRANSITION_ENTER = 1; // Spring forward (gain an hour)
+    DST_TRANSITION_LEAVE = 2; // Fall back (lose an hour)
+}
+
+// Single entry in the recent-NTP-sync ring buffer. RAM-only on the device
+// (lost on reboot), populated in chronological order: oldest → newest.
+message NtpSyncRecord {
+    uint32 unix_time          = 1; // Y2K-relative seconds at the moment of acceptance
+    sint32 correction_seconds = 2; // server - rtc, before stepping (signed)
+    uint32 rtt_ms             = 3; // Request → response round-trip
+    uint32 stratum            = 4; // From NTP packet[1] (1-15 valid)
+}
+
+// Returned in response to AdminMessage{GET, TIME_DIAGNOSTICS}.
+//
+// Performs a fresh ~250 ms LSE-vs-HSE ppm measurement on every call unless
+// the caller recently issued AdminPropertyType_TIME_DIAG_MEASURE_LSE (RUN),
+// in which case the cached result is returned. Otherwise side-effect-free.
+message AdminTimeDiagnosticsMessage {
+    // ===== Clock source identity & health =====
+    ClockSource rtc_clock_source              = 1;  // LSE / LSI / UNKNOWN
+    bool   lse_ready_now                      = 2;  // RCC->BDCR.LSERDY at read time
+    bool   lse_css_enabled                    = 3;  // RCC->BDCR.LSECSSON
+    bool   lse_css_fault_latched              = 4;  // RCC->BDCR.LSECSSD — sticky once tripped
+    uint32 nominal_lse_hz                     = 5;  // 32768
+    uint32 hse_hz                             = 6;  // SystemCoreClock (reference rate)
+
+    // ===== Independent frequency measurement =====
+    ClockMeasurementStatus measurement_status = 10;
+    sint32 measured_lse_ppm_error             = 11; // (measured - 32768) ppm
+    uint32 measurement_window_us              = 12; // Actual elapsed window
+    uint32 measurement_dwt_delta              = 13; // Raw HCLK cycles in the window
+    uint32 measurement_rtc_subsec_delta       = 14; // Raw SSR ticks in the window
+
+    // ===== Active calibration tracking =====
+    float  applied_ppm_correction             = 20; // Active RTC ppm calibration value at read time
+    float  temperature_at_last_calibration    = 21; // Internal MCU temp °C at last hour-boundary call
+    uint32 smooth_calib_period_seconds        = 22; // 32 seconds
+    bool   rtc_temp_comp_enabled              = 23; // Persisted action-knob state
+    bool   rtc_ppm_manual_override_enabled    = 24; // Persisted action-knob state
+    sint32 rtc_ppm_manual_override_value      = 25; // Persisted action-knob state
+
+    // ===== NTP history =====
+    bool   ntp_enabled_in_config              = 30; // NTP enabled in config
+    string ntp_server_hostname                = 31; // From config (max_size enforced in .options)
+    uint32 ntp_sync_success_count             = 32; // Lifetime, persisted
+    uint32 ntp_sync_failure_count             = 33; // Lifetime, persisted
+    uint32 last_ntp_success_unix              = 34; // 0xFFFFFFFF means never (Y2K epoch)
+    uint32 last_ntp_attempt_unix              = 35; // Either success or failure (Y2K epoch)
+    sint32 last_ntp_correction_seconds        = 36; // Signed: server - rtc at last success
+    uint32 last_ntp_rtt_ms                    = 37; // Round-trip of last attempt
+    uint32 last_ntp_stratum                   = 38; // Stratum of last successful response
+    uint32 effective_ntp_poll_period_seconds  = 39; // ntp_poll_period_seconds override if set, else config NTPTimeout
+    uint32 ntp_max_acceptable_delta_seconds   = 40; // The rejection threshold currently in force
+    string last_ntp_error                     = 41; // Last NTP error string (max 32 chars)
+    repeated NtpSyncRecord ntp_history        = 42; // Oldest → newest, RAM only
+
+    // ===== RTC liveness & integrity =====
+    uint32 rtc_unix_epoch_now                 = 50; // Y2K seconds at read time
+    uint32 rtc_subseconds_now                 = 51; // RTC->SSR snapshot
+    bool   rtc_advancing                      = 52; // SSR observed to change during a 200 µs probe
+
+    // ===== Backup-domain integrity =====
+    bool   last_boot_lost_backup              = 60; // backup-domain canary was clear at this boot's start
+    uint32 boots_since_last_backup_loss       = 61; // Persisted, bumped each boot when canary valid
+    bool   rtc_ever_been_set                  = 62; // True once any non-DST set has occurred since loss
+    float  vbat_voltage                       = 63; // Backup battery voltage
+    bool   vbat_low                           = 64; // backup battery voltage below the low-battery threshold
+
+    // ===== DST visibility =====
+    bool             dst_enabled_in_config       = 70;
+    bool             dst_currently_active        = 71; // DST store flag active
+    sint32           dst_offset_seconds          = 72; // -3600 / 0 / +3600
+    uint32           dst_last_transition_unix    = 73; // 0 until first observed transition (Y2K epoch)
+    uint32           dst_next_transition_unix    = 74; // Computed forward from current date
+    DstTransitionType dst_next_transition_type   = 75;
+    DstHemisphere    dst_hemisphere              = 76;
+
+    // ===== Time-set audit =====
+    uint32        total_time_set_count        = 80; // Lifetime, persisted
+    uint32        last_time_set_unix          = 81; // Y2K seconds of the last set
+    TimeSetSource last_time_set_source        = 82;
+    sint32        last_manual_set_delta_seconds = 83; // (new - old) at the last non-NTP, non-DST set
+
+    uint32 uptime_seconds                     = 90;
+}
+
+// ===== DALI SYSTEM STATUS =====
+
+// Per-line DALI health snapshot. Mirrors one line of the device's
+// DALI status structure. Short-address bitmaps use bit n = DALI short address n.
+message DaliLineStatus {
+    uint32 line_index           = 1; // 0-based physical DALI line index
+    uint32 device_count         = 2; // Devices currently online (popcount of the poll mask)
+    uint32 fault_count          = 3; // Devices on this line reporting a lamp or gear fault
+    bool   bus_power_error      = 4; // TRUE if the DALI bus itself is down (debounced)
+    uint32 lowest_fault_address = 5; // Lowest DALI short address with a fault (0xFF = none)
+    uint64 missing_devices_mask = 6 [jstype = JS_STRING]; // Latching bitmap of devices that failed retries (gone silent). JS_STRING so JS clients keep full 64-bit precision (a JS number loses bits above 2^53).
+    uint64 comms_error_mask     = 7 [jstype = JS_STRING]; // Bitmap of devices present but returning corrupted responses. JS_STRING so JS clients keep full 64-bit precision (a JS number loses bits above 2^53).
+}
+
+// DALI system status summary. Returned in response to AdminMessage{GET, DALI_STATUS}.
+// Read-only mirror of the device's DALI system status — the
+// same structure the on-device Logic system evaluates for "any DALI error" actions.
+message AdminDaliStatusMessage {
+    repeated DaliLineStatus lines = 1; // One entry per configured DALI line, in line-index order
+    bool any_system_fault         = 2; // Global flag: TRUE if any line has any fault
+    bool polling_active           = 3; // FALSE if DALI polling is disabled (dali_polling_interval == 0). When FALSE the per-line data is NOT live — a clean report means "not being monitored", not "no faults". Clients (e.g. a BMS) must check this before trusting any_system_fault.
+}
+
+// The Main AdminMessage used with the specific oneof message type.
+message AdminMessage {
+    AdminCommandType command                              = 1; // What type of Command to run (GET / SET / etc.)
+    AdminPropertyType target                              = 2; // Which property to run the Command on
+    oneof payload {
+        PayloadMessage data                               = 3;
+        AdminNetworkPropertiesMessage network_properties  = 4;
+        AdminProjectPropertiesMessage project_properties  = 5;
+        AdminControllerLinesMessage controller_lines      = 6;
+		AdminDeviceStatusMessage device_status			  = 7;
+		AdminConfigStatusMessage config_status 			  = 8;
+		UpdateTimeMessage device_time					  = 9;
+        AdminDALISensorTypeMessage dali_sensor_type       = 10;
+        AdminDNSServersMessage dns_servers                = 11;
+        AdminDMXGlobalTimingConfig dmx_timing_mode        = 12; // Applies to all lines
+        AdminDMXLineParameters dmx_line_props             = 13; // One entry per active DMX line
+        AdminMemoryDiagnosticsMessage memory_diagnostics  = 14; // Per-task stack HWMs + system/section memory usage
+        AdminEthernetDiagnosticsMessage ethernet_diagnostics = 15; // Ethernet PHY regs, Ethernet MAC counters, link-event ring buffer
+        AdminLineDiagnosticsMessage line_diagnostics      = 16; // Per-line configured-vs-probed daughterboard type + coarse OK/FAULTY/EMPTY/MISCONFIGURED verdict
+        AdminTimeDiagnosticsMessage time_diagnostics      = 17; // RTC/NTP/DST observability snapshot
+        AdminDaliStatusMessage dali_status                = 18; // DALI system status summary (per-line device/fault counts + missing/comms-error bitmaps)
+        AdminUserAccountMessage user_account              = 19; // Provision a role's login secret (USER_ACCOUNT, SET, ADMIN)
+    }
+}
+
+/************ @exclude FIRMWARE UPDATE ********/
+// Simple free-form binary data blob that can be used for chunk transfer.
+message DataMessage {
+    uint32 identifier     = 1; // A free-form number that indicates exactly what type of data is being dealt with. Eg. 0x99 may indicate a firmware flash.
+    uint32 seq            = 2; // The message position in the sequence.
+    uint32 count          = 3; // The expected total number of DataMessages to be sent. When seq == count, you know you've got the last chunk and can go ahead and process the data (eg. flash firmware).
+    repeated uint32 data  = 4;
+}
+
+// Firmware Update Meta Message. Contains information on new incoming firmware. Sending this message begins the update process and will ERASE the currently stored firmware
+message FirmwareMetaMessage {
+	uint32 firmware_version 			 = 1; // MSB.XXX.LSB
+	uint32 firmware_date	 			 = 2; // Day/Month/Year Compiled - Deprecated, use tag = 10, 11, 12
+	uint32 firmware_date_upload          = 3; // Day/Month/Year Uploaded - Deprecated, uses controller time
+	uint32 firmware_checksum		     = 4; // Checksum to verify data
+	uint32 firmware_chunk_count	         = 5; // Number of stored chunks
+	uint32 firmware_base_address 	     = 6; // Base Address of the Firmware
+	uint32 firmware_end_address	         = 7; // End Address - For sector erases
+    bool firmware_is_backup              = 8; // Flag to send Firmware to 'Backup' Location
+    repeated uint32 nonce                = 9; // Decryption Nonce
+    uint32 firmware_date_day             = 10; // Day in Firmware File
+    uint32 firmware_date_month           = 11; // Month in Firmware File
+    uint32 firmware_date_year            = 12; // Year in Firmware File
+    bytes signature                      = 13; // Optional image signature over the staged chunk stream (raw bytes). Absent => unsigned image.
+    // Optional encrypted-firmware (V3) fields. Absent, or firmware_format==0, means a classic image.
+    uint32 firmware_format               = 14; // 0 = classic, 3 = encrypted (V3)
+    uint32 kem_alg                       = 15; // Content-key wrap algorithm identifier
+    uint32 content_alg                   = 16; // Chunk-payload cipher identifier
+    bytes content_iv                     = 17; // 16-byte base initialisation vector
+    bytes wrapped_content_key            = 18; // Wrapped content key (raw bytes)
+}
+
+// Reply from eDIDIO, or command from program. eDIDIO will check firmware before 'Apply'
+message FirmwareControlMessage {
+	FirmwareCommandType cmd  = 1;
+    bool firmware_is_backup  = 2; // Flag used for FW_READ, FW_VERIFY, and FW_CLONE. Does not work for FW_APPLY
+}
+
+// Chunk of firmware to be sent via a 256 byte payload
+message FirmwareChunkMessage {
+	uint32 firmware_address       = 1;
+	uint32 total_bytes            = 2;
+    DataMessage payload           = 3;
+}
+
+
+/************ @exclude SYSTEM LOGGING ************/
+// Message sent to read the logs. The start address is offset for how many logs are requested. Up to 32 logs are sent in one message.
+message SystemLogReadMessage {
+    uint32 log_start_address            = 1;  // Which log to start from
+    uint32 logs_requested               = 2;  // How many logs requested? Max of 32
+	repeated SystemLogMessage logs      = 3;  // Array of requested logs
+}
+
+// Individual Log packet containing oneof log type of information. Logs are timestamped using the timesinceboot parameter. The boot packet will provide the time of boot, so exact times can be extracted
+message SystemLogMessage {
+	uint32 time_since_boot              = 1;	// Time since boot (From latest power message)
+	oneof packet {                           
+		SystemLogBoot boot              = 2;
+		SystemLogNetLink netlink        = 3;
+		SystemLogNTP ntp                = 4;
+		SystemLogTrigger trigger        = 5;
+		SystemLogSpektra spektra        = 6;
+		SystemLogSchedule schedule      = 7;
+		SystemLogUserStart userstart    = 8;		
+	}
+}
+
+// Message for Log Boot Type
+message SystemLogBoot {
+	TimeClockMessage timeclock  = 1;
+	uint32 flags                = 2;
+}
+
+// Message for Log Netlink Type
+message SystemLogNetLink {
+	bool is_linked              = 1;
+}
+
+// Message for Log NTP Type
+message SystemLogNTP {
+	TimeClockMessage timeclock  = 1;
+}
+
+// Message for Log Trigger Type
+message SystemLogTrigger {
+	TriggerMessage trigger      = 1;
+	ReadType source             = 2;
+}
+
+// Message for Log Spektra Type
+message SystemLogSpektra {
+	SpektraActionType action    = 1;
+	SpektraTargetType type      = 2;
+	uint32 index                = 3;
+}
+
+// Message for Log Schedule Type
+message SystemLogSchedule {
+	uint32 index    = 1;
+	uint32 isStart  = 2;
+	uint32 second   = 3;
+	uint32 minute   = 4;
+	uint32 hour     = 5;
+}
+
+// Message for Log User Start Type
+message SystemLogUserStart {
+	TimeClockMessage timeclock  = 1;
+    uint32 flags                = 2;
+}
+
+// Message to contain system metadata for debugging purposes
+message SystemMetaDataReadMessage {
+    repeated uint32 input_press_counter     = 1; // Max 24 Inputs
+    repeated uint32 list_start_counter      = 2; // Max 32 Lists
+    repeated uint32 schedules_counter       = 3; // Max 10 Alarms
+    uint32 screen_on_time                   = 4; // Time in seconds
+    uint32 screen_dim_time                  = 5; // Time in seconds
+    uint32 screen_saver_time                = 6; // Time in seconds
+    uint32 reboot_counter                   = 7; // Number of reboots since Data erased
+}
+
+/******************** @exclude Events ******************/
+// Message to set Event Filter Mask
+message EventFilter {
+    bool input                       = 1; // eDIDIO physical inputs
+    bool dali_arc_level              = 2; // 16-bit DALI Arc Level Commands
+    bool dali_command                = 3; // 16-bit DALI Commands
+    bool dali_sensor                 = 4; // DALI Sensors (24-bit and 25-bit)
+    bool dali_input                  = 5; // 24-bit DALI Inputs
+    bool dmx_stream_changed          = 6; // DMX output stream changes
+    bool dali_24_frame               = 7; // Raw 24-bit DALI frames
+    bool trigger_message             = 8; // High Level Trigger from Input/List/Sensor/Schedule
+}
+
+// Message Response for Trigger Event
+message TriggerEvent {
+    TriggerType type                  = 1; // What type of Trigger occurred
+    oneof payload {
+        uint32 level                  = 2; // Associated level (if applicable)
+        DALICommandType dali_command  = 3; // Associated DALI Command (if applicable)
+    }
+    uint32 target_address             = 4; // The target address for the TriggerType (if applicable)
+    uint32 line_mask                  = 5; // The Line(s) on which the Trigger occurred (if applicable)
+    uint32 zone                       = 6; // The zone of the Trigger (if applicable)
+    uint32 value                      = 7; // The value of the Trigger (if applicable)
+    uint32 query_index                = 8; // The query_index of the Trigger (if applicable)
+    uint32 source                     = 9; // The source of the trigger (input/list/sensor) (if applicable)
+}
+
+// Message Response for DALI 24 Input Event
+message DALI24InputEvent {
+    uint32 index            = 1;
+    uint32 line             = 2;
+    uint32 address          = 3;
+    DALI24InputType type    = 4; // Momentary Short / Momentary Long / Latch Low / Latch High / Positional
+    uint32 arg              = 5; // Relevant information for the DALI24InputType
+}
+
+// Message Response for DALI 24 Frame Event
+message DALI24FrameEvent {
+    uint32 line             = 1; // Which DALI Line within the eDIDIO (left -> right): 1, 2, 3, 4
+    uint32 frame            = 2; // The 24-bit Frame
+}
+
+// Message Response for DALI Sensor Event
+message DALISensorEvent {
+    uint32 index                            = 1;
+    uint32 line                             = 2;
+    uint32 address                          = 3;
+    DALIMotionSensorStates motion_state     = 4; // Idle / Disabled / Warning / Occupancy
+    DALILuxSensorStates lux_state           = 5; // Disabled / Enabled / Deviate
+    uint32 lux_level                        = 6;
+}
+
+/* A message sent to a client when an event occurs. Depending on the event type (Trigger, Input or Sensor) different data is supplied with the event.
+* If a client sends an EventMessage with EventType of REGISTER then broadcast events out to the client.
+*/
+message EventMessage {
+    EventType event                             = 1;
+    oneof event_data {
+        TriggerEvent trigger                    = 2;
+        InputStateResponse inputs               = 3;
+        PayloadMessage payload                  = 4;
+        // OBSOLETE: JoinedRoomsMessage joined_rooms (5) --> No longer used
+        DALISensorEvent sensor                  = 6;
+        DALI24InputEvent dali_24_input          = 7;
+        EventFilter filter                      = 8;
+        DALI24FrameEvent dali_24_frame          = 9;
+    }
+}
+
+/* ===== SD Card File Operations ===== */
+
+enum SdFileControlType {
+    SD_STAT         = 0;  // Get file info (size, date, time)
+    SD_GET_SPACE    = 1;  // Get free/total bytes on card
+    SD_DELETE       = 2;  // Delete a file (stub: returns ACCESS_DENIED until approved)
+    SD_WRITE_BEGIN  = 3;  // Begin upload session (creates temp file)
+    SD_WRITE_END    = 4;  // Finalize upload (rename temp -> target)
+    SD_WRITE_ABORT  = 5;  // Cancel upload (delete temp file)
+    SD_WRITE_RESUME = 6;  // Resume interrupted upload (returns bytes already written to temp)
+}
+
+enum SdStatusCode {
+    SD_OK             = 0;
+    SD_NOT_MOUNTED    = 1;
+    SD_FILE_NOT_FOUND = 2;
+    SD_ACCESS_DENIED  = 3;
+    SD_DISK_FULL      = 4;
+    SD_IO_ERROR       = 5;
+    SD_INVALID_PATH   = 6;
+    SD_BUSY           = 7;
+    SD_TIMEOUT        = 8;
+    SD_WRITE_ERROR    = 9;
+}
+
+// A single directory entry returned in SdDirListMessage
+message SdDirEntry {
+    string name       = 1;  // 8.3 filename (max 12 chars + null)
+    uint32 size       = 2;  // File size in bytes
+    uint32 date       = 3;  // FAT date: ((year-1980)<<9)|(month<<5)|day
+    uint32 time       = 4;  // FAT time: (hour<<11)|(min<<5)|(sec/2)
+    bool is_directory = 5;
+}
+
+// Browse SD card directory contents (paginated)
+message SdDirListMessage {
+    // Request fields
+    string path        = 1;  // Directory path, e.g. "logs/dali"
+    uint32 offset      = 2;  // Skip this many entries (for pagination)
+    uint32 max_entries = 3;  // Max entries to return (device caps at 16)
+    // Response fields
+    SdStatusCode status     = 4;
+    repeated SdDirEntry entries = 5;  // Directory entries
+    bool has_more           = 6;  // True if more entries available
+}
+
+// Read a chunk of a file from the SD card
+message SdFileReadMessage {
+    // Request fields
+    string path    = 1;  // File path, e.g. "logs/sys/SYS_0001.LOG"
+    uint32 offset  = 2;  // Byte offset to start reading from
+    uint32 length  = 3;  // Bytes requested (device caps at 512)
+    // Response fields
+    SdStatusCode status = 4;
+    uint32 file_size    = 5;  // Total file size (from f_stat at read time)
+    uint32 bytes_read   = 6;  // Actual bytes returned in data
+    bytes data          = 7;  // File content chunk (max 512 bytes)
+}
+
+// Write a chunk of data to the SD card (during an upload session)
+message SdFileWriteMessage {
+    // Request fields
+    uint32 offset = 1;  // Byte offset for this chunk
+    bytes data    = 2;  // Data to write (max 512 bytes)
+    // Response fields
+    SdStatusCode status  = 3;
+    uint32 bytes_written = 4;  // Actual bytes written
+}
+
+// File control operations (stat, delete, space, upload begin/end/resume)
+message SdFileControlMessage {
+    // Request fields
+    SdFileControlType command = 1;
+    string path               = 2;  // File or directory path
+    uint32 expected_size      = 3;  // For WRITE_BEGIN: expected total size (advisory)
+    // Response fields
+    SdStatusCode status = 4;
+    uint32 file_size    = 5;  // For STAT/WRITE_RESUME: file size in bytes
+    uint32 file_date    = 6;  // For STAT: FAT date
+    uint32 file_time    = 7;  // For STAT: FAT time
+    uint64 free_bytes   = 8;  // For GET_SPACE
+    uint64 total_bytes  = 9;  // For GET_SPACE
+}
+
+// Log category enable/disable configuration
+message SdLogConfigMessage {
+    bool is_write              = 1;  // false=read config, true=write config
+    uint32 enabled_mask        = 2;  // Bitmask: bit N = log category N enabled
+    uint32 api_version         = 3;  // Client's API version
+    // Response fields
+    SdStatusCode status        = 4;
+    uint32 current_mask        = 5;  // Current enabled mask after operation
+    uint32 category_count      = 6;  // Number of log categories (11)
+    uint32 device_api_version  = 7;  // Device's API version
+}
+
+// Live log streaming - subscribe to real-time log entries pushed by the device
+message SdLogStreamMessage {
+    // Request fields (client -> device: subscribe/unsubscribe)
+    bool subscribe             = 1;  // true=subscribe, false=unsubscribe
+    uint32 category_mask       = 2;  // Bitmask of categories to stream
+
+    // Push fields (device -> client: new log entry)
+    uint32 category            = 3;  // log category value
+    uint32 timestamp_ms        = 4;  // FreeRTOS tick count (milliseconds since boot)
+    uint32 rtc_time            = 5;  // RTC seconds since 2000-01-01
+    bytes payload              = 6;  // Text log line or binary entry (DALI 12B / EVENT 35B)
+    uint32 sequence            = 7;  // Monotonic sequence number (detects missed entries)
+    uint32 level               = 8;  // Log level: 0=ERROR, 1=WARN, 2=INFO. Push only; binary categories write 0.
+}
+
+/* ===== Event Stream v2 (tag 77) — typed live event/log stream =====
+ *
+ * Replaces SdLogStreamMessage (tag 69, deprecated) on the wire. Same transport,
+ * sequence/timestamp/level observability and ISR-safe SD-independent producers,
+ * but a TYPED, endian-safe, forward-compatible payload instead of raw C structs
+ * memcpy'd into a bytes field. Runs on ALL hardware variants (not SD-specific).
+ *
+ * Enum-valued fields are carried as uint32 (values documented inline) rather than
+ * proto enums, for forward-compatibility (new firmware values decode as numbers on
+ * old clients) and consistency across every discriminator in this family.
+ */
+message EventStreamMessage {
+    // ---- request (client -> device) ----
+    bool   subscribe        = 1;
+    uint32 category_mask    = 2;   // bit N = category N
+    uint32 level_threshold  = 3;   // push text iff level <= threshold (0=ERR,1=WARN,2=INFO)
+
+    // ---- common push envelope (device -> client) ----
+    bool   ack              = 4;   // true only on the subscribe/unsubscribe reply
+    uint32 sequence         = 5;   // monotonic per-connection; gaps => dropped entries
+    uint32 timestamp_ms     = 6;   // authoritative: producer tick, ms since boot
+    uint32 rtc_time         = 7;   // seconds since 2000-01-01 (0 if RTC unset)
+    uint32 category         = 8;   // log category value
+    uint32 level            = 9;   // text severity; 0 for binary/structured categories
+
+    // ---- the entry (typed; self-describing) ----
+    oneof entry {
+        string        text      = 10;  // text categories (0,2,4,5,6,7,8,9)
+        InputEvent    input     = 11;
+        SensorEvent   sensor    = 12;
+        ListEvent     list      = 13;
+        ScheduleEvent schedule  = 14;
+        ConfigEvent   config    = 15;
+        BootEvent     boot      = 16;
+        NetEvent      net       = 17;
+        DaliFrame     dali      = 18;  // raw frame + decoded envelope
+        bytes         raw       = 19;  // forward-safe fallback: META/unknown types
+        SpektraEvent  spektra   = 20;  // sequence/theme playback (EVT_TYPE_SPEKTRA)
+        CommandEvent  command   = 21;  // standalone trigger/command (network, logic, IR, device, iRAD)
+    }
+}
+
+// Trigger action embedded in Input/Schedule/List (matches what producers hold).
+message TriggerInfo {
+    uint32 trigger_type   = 1;   // TriggerType enum
+    uint32 target_index   = 2;
+    uint32 value          = 3;
+    uint32 line_mask      = 4;
+}
+
+message InputEvent {
+    uint32 input_index    = 1;
+    uint32 source         = 2;   // ReadType: 0=GPIO, 15=DALI
+    uint32 press_type     = 3;   // GPIO or DALI press type (per source)
+    TriggerInfo action    = 4;
+    // reclaimed (DALI inputs only; 0/absent for GPIO)
+    uint32 dali_line      = 5;
+    uint32 dali_address   = 6;
+    uint32 raw_arg        = 7;   // raw rotary/positional value pre-transform
+}
+
+message SensorEvent {
+    uint32 sensor_index   = 1;
+    uint32 transition     = 2;   // sensor transition type
+    uint32 light_state    = 3;
+    uint32 motion_state   = 4;
+    uint32 lux_value      = 5;
+    // reclaimed (available in the sensor struct)
+    uint32 dali_line      = 6;
+    uint32 dali_address   = 7;
+}
+
+message ListEvent     { uint32 list_index=1; uint32 step_index=2; uint32 list_state=3; TriggerInfo action=4; }
+message ScheduleEvent { uint32 alarm_index=1; bool is_end=2; TriggerInfo action=3; }
+message ConfigEvent   { uint32 read_type=1; uint32 item_index=2; uint32 source=3; uint32 profile_index=4;
+                        bytes ip=5; uint32 port=6; bytes mac=7; }   // ip/mac 0-len for non-network sources
+message BootEvent     { uint32 reset_cause=1; uint32 profile_index=2; }
+message NetEvent      { uint32 event=1; bytes ip=2; uint32 port=3; bytes mac=4; uint32 reason=5; }
+
+// Spektra sequence/theme playback event (EVT_TYPE_SPEKTRA).
+message SpektraEvent {
+    uint32 zone           = 1;
+    uint32 action         = 2;   // Spektra action: 1=START,2=STOP,3=PAUSE
+    uint32 target         = 3;   // Spektra target: 1=SEQUENCE,2=THEME
+    uint32 index          = 4;   // sequence/theme index
+}
+
+message DaliFrame {
+    uint32 line       = 1;   // 0-3, 0xFF=META
+    uint32 direction  = 2;   // 0=TX,1=RX,0xFF=META
+    uint32 frame_type = 3;   // 0=8b,1=16b,2=24b (or META subtype)
+    uint32 status     = 4;
+    uint32 frame      = 5;   // RAW frame bits (up to 24) — the deliberate raw payload
+}
+
+// A trigger/command executed by a non-input origin (network, logic, IR, device, iRAD).
+// The action is a plain TriggerInfo; `source` says where it came from. Reuses the
+// ConfigEvent precedent of discriminating origin with a field, not a message type.
+// The successor to legacy TRIGGER_EVENT / CONTROL_EVENT.
+message CommandEvent {
+    uint32 source        = 1;   // ReadType_*: 2=IR, 10=NETWORK, 11=DEVICE, 14=LOGIC, 255=iRAD/internal
+    TriggerInfo action   = 2;   // trigger_type, target_index, value, line_mask
+    uint32 zone          = 3;   // trigger zone        (0 if unused by this command)
+    uint32 query_index   = 4;   // trigger query_index (0 if unused by this command)
+    // Network-origin identity (source==NETWORK only; 0-len / 0 otherwise). Mirrors ConfigEvent.
+    bytes  ip            = 5;
+    uint32 port          = 6;
+    bytes  mac           = 7;
+}
+
+/* ===== SD Card Log Rotation Policy =====
+ *
+ * Rotation policy table controls
+ * per-category disk-budget, max-file-size and prune priority. Read with
+ * SD_LOG_POLICY_GET, modify with SD_LOG_POLICY_SET, restore factory defaults
+ * with SD_LOG_POLICY_RESET.
+ *
+ * directory/prefix/extension are READ-ONLY: they are baked into rotation
+ * filename parsing and changing them would strand existing files on disk.
+ * They are returned in responses for client display only; values supplied by
+ * the client in SET requests are ignored.
+ *
+ * Mutable bounds:
+ *   budget_permille  : 0..1000          (per-mille of total usable disk)
+ *   max_file_size_kb : 32..32768        (32 KB min - 32 MB max)
+ *   priority         : 0..255           (lower = pruned first)
+ *
+ * SET is all-or-nothing: every entry validated before any commit. On failure
+ * the device returns the offending category and field; existing config is
+ * unchanged.
+ *
+ * Persistence: backup SRAM (canonical, fast) mirrored to logs/logpolicy.dat
+ * on the SD card. If SRAM magic/CRC is invalid at boot (e.g. coin cell died),
+ * the device falls back to the SD mirror; if both are missing the flash
+ * default table is used.
+ */
+
+enum SdLogPolicyOp {
+    SD_LOG_POLICY_GET   = 0;  // Read current policy table
+    SD_LOG_POLICY_SET   = 1;  // Validate + commit new policy table
+    SD_LOG_POLICY_RESET = 2;  // Restore flash factory defaults
+}
+
+// Identifies which field in a SET request failed validation. Returned in
+// SdLogPolicyMessage.invalid_field when status != SD_OK.
+enum SdLogPolicyField {
+    SD_LOG_POLICY_FIELD_NONE             = 0;
+    SD_LOG_POLICY_FIELD_CATEGORY         = 1;  // category index out of range or missing
+    SD_LOG_POLICY_FIELD_BUDGET_PERMILLE  = 2;
+    SD_LOG_POLICY_FIELD_MAX_FILE_SIZE_KB = 3;
+    SD_LOG_POLICY_FIELD_PRIORITY         = 4;
+    SD_LOG_POLICY_FIELD_DUPLICATE        = 5;  // same category appears twice in a SET
+    SD_LOG_POLICY_FIELD_COUNT            = 6;  // wrong number of entries in a SET
+}
+
+message SdLogPolicyEntry {
+    uint32 category           = 1;  // log category value (0..category_count-1)
+    string directory          = 2;  // read-only (response)
+    string prefix             = 3;  // read-only (response)
+    string extension          = 4;  // read-only (response)
+    uint32 budget_permille    = 5;  // 0..1000
+    uint32 max_file_size_kb   = 6;  // 32..32768
+    uint32 priority           = 7;  // 0..255
+    uint32 current_disk_bytes = 8;  // read-only (response): bytes currently on disk for this category
+}
+
+message SdLogPolicyMessage {
+    // Request fields
+    SdLogPolicyOp op                  = 1;
+    repeated SdLogPolicyEntry entries = 2;  // For SET: full table (one per category)
+
+    // Response fields
+    SdStatusCode status               = 3;  // SD_OK or rejection reason
+    SdLogPolicyField invalid_field    = 4;  // Which field tripped validation (0 if ok)
+    uint32 invalid_category           = 5;  // Which category's entry failed (0 if ok)
+    uint32 category_count             = 6;  // Number of categories on the device
+    uint32 device_api_version         = 7;  // 1 = initial release
+}
+
+/* ===== Connection Status (all firmware variants) ===== */
+
+// Per-connection details returned in ConnectionStatusMessage.
+message ConnectionInfo {
+    bytes  ip_bytes  = 1; // 4-byte IPv4 address of the connected client
+    uint32 port      = 2; // TCP source port of the connected client
+    bytes  mac_bytes = 3; // 6-byte MAC address; all-zero if ARP resolution failed
+    bool   is_tls    = 4; // True if this connection is TLS, false if plain TCP
+}
+
+// Query active client connections.
+// Send with no fields populated to request current status.
+// The device responds with slot counts and per-connection details.
+message ConnectionStatusMessage {
+    uint32 max_connections          = 1; // Maximum simultaneous connections this device supports
+    uint32 active_count             = 2; // Number of currently active connections
+    repeated ConnectionInfo connections = 3; // Details for each active connection (active_count entries)
+}
+
+/* ===== Crash Log (all firmware variants, not SD-card-dependent) ===== */
+
+// Read the crash/reset record captured from backup SRAM at boot.
+// The device captures a 128-byte crash record into battery-backed SRAM on
+// HardFault/MemManage/BusFault/UsageFault/stack overflow/watchdog/assert.
+// On the next boot, the record is held in RAM for network retrieval.
+message CrashLogMessage {
+    // Request fields
+    bool clear                 = 1;  // If true, acknowledge/clear the pending crash record
+
+    // Response fields
+    bool has_crash             = 2;  // True if a crash was recorded before this boot
+    uint32 crash_type          = 3;  // Crash type: 0=none,1=hardfault,2=memmanage,3=busfault,
+                                     //   4=usagefault,5=stack_overflow,6=watchdog,7=assert
+    uint32 reset_cause         = 4;  // Reset cause, packed as a bitmask:
+                                     //   bit0=POR, bit1=software, bit2=IWDG, bit3=WWDG,
+                                     //   bit4=low_power, bit5=pin_reset
+    bytes crash_data           = 5;  // Full 128-byte crash record (binary, for detailed
+                                     //   analysis — client decodes per struct layout)
+    string task_name           = 6;  // FreeRTOS task name at fault (convenience, max 7 chars)
+    uint32 pc                  = 7;  // Program counter at fault (convenience)
+    uint32 lr                  = 8;  // Link register at fault (convenience)
+    uint32 time_since_boot     = 9;  // Uptime in seconds before crash
+    uint32 cfsr                = 10; // Cortex-M Configurable Fault Status Register (convenience)
+    uint32 boot_watchdog_flags = 11; // Watchdog status captured from .noinit RAM at boot (only valid on IWDG resets).
+                                     // Bitmask of tasks that fed the watchdog before reset.
+                                     // Missing bits indicate which tasks stalled.
+                                     // 0 if the reset was not caused by IWDG.
+
+    // Build info of the *running* firmware (populated unconditionally, not crash-specific)
+    string firmware_version    = 12; // Running firmware version (e.g. "1.2.3")
+    string commit_hash         = 13; // Git commit hash from the build system
+    string build_date          = 14; // Build date/time string (e.g. "Apr  8 2026 14:30:00")
+
+    // RTC wall-clock time of the boot after the crash (same as the SD crash.log header timestamp).
+    // Combined with time_since_boot, the client can estimate when the crash actually occurred.
+    uint32 boot_rtc_timestamp  = 15; // RTC seconds since 2000-01-01 at this boot
+
+    // Per-task stack high-water-mark snapshot captured at boot from .noinit stacks.
+    // Binary per-task stack-HWM snapshot (up to 200 bytes). Always populated when available,
+    // regardless of whether a crash was recorded. Reflects the *previous* boot's stack usage.
+    bytes task_hwm_data        = 16;
+}
+
+// ===================== Device Provisioning (per-device PKI identity) =====================
+// Installs a per-device PKI identity over the existing link. The device validates the supplied
+// certificate chain, binds it to the device's unique ID, and stores the identity.
+// One-time step accepted only while UNPROVISIONED.
+
+enum ProvisionState {
+    PROVISION_STATE_UNPROVISIONED = 0;  // Default: no identity; accepts InstallIdentity
+    PROVISION_STATE_PROVISIONED   = 1;  // Identity in flash; refuses re-provision (Decommission first)
+}
+
+enum ProvisionResult {
+    PROVISION_RESULT_OK               = 0;
+    PROVISION_RESULT_ERR_PARSE        = 1;  // supplied identity failed to parse
+    PROVISION_RESULT_ERR_CHAIN        = 2;  // certificate chain did not validate
+    PROVISION_RESULT_ERR_UID_MISMATCH = 3;  // certificate does not match this device's unique ID
+    PROVISION_RESULT_ERR_POP          = 4;  // key consistency check failed
+    PROVISION_RESULT_ERR_FLASH        = 5;  // identity store failed
+    PROVISION_RESULT_ERR_ALREADY_DONE = 6;  // already PROVISIONED; Decommission first
+}
+
+// Tag 73: read identity state. Request is empty; response carries state/uid/fingerprint (all public).
+message ProvisionGetStateMessage {
+    ProvisionState state       = 1;  // Response
+    bytes          uid         = 2;  // Response: 96-bit unique device ID (12 bytes)
+    bytes          fingerprint = 3;  // Response: certificate fingerprint (32 bytes; empty if UNPROVISIONED)
+}
+
+// Tag 74: install identity, uploaded as a CHUNKED stream (mirrors FirmwareChunkMessage). The host
+// sends a self-describing identity blob in <=256 B chunks; the device reassembles it and, on the
+// final chunk, validates the certificate chain, binds it to the device ID, and stores the identity.
+message ProvisionInstallIdentityMessage {
+    uint32          total_length = 1;  // Request: total identity-blob length (sent on every chunk)
+    uint32          offset       = 2;  // Request: byte offset of this chunk within the blob
+    bytes           data         = 3;  // Request: chunk payload (<=256 B)
+    bool            last         = 4;  // Request: true on the final chunk -> validate + store
+    bool            ok           = 5;  // Response
+    ProvisionResult result       = 6;  // Response
+    uint32          received     = 7;  // Response: bytes accepted so far (resume/diagnostics)
+}
+
+// Tag 75: proof of possession. Request = {nonce}; response = {signature} (device signs the nonce).
+message ProvisionProofOfPossessionMessage {
+    bytes nonce     = 1;  // Request: tool-supplied challenge
+    bytes signature = 2;  // Response: signature over the nonce using the device's private key
+}
+
+// Tag 76: decommission back to UNPROVISIONED (phase 2: authenticated). Response = {ok, result}.
+message ProvisionDecommissionMessage {
+    bool            ok     = 1;  // Response
+    ProvisionResult result = 2;  // Response
+    // Request auth fields are deferred to phase 2 (challenge-response against the installed identity).
+}
+
+/* Every Message to and from the eDIDIO will be a populated EdidioMessage with a singular payload.
+* The EdidioMessage itself is wrapped with a 0xCD Start Byte and 2 Bytes denoting total Message Length of the form: [Length MSB, Length LSB]
+*/
+message EdidioMessage
+{
+    uint32 message_id                                         = 1; // As decided by the client. Will not be unique across clients.
+    oneof payload {
+        AckMessage ack                                        = 2;
+        InputMultiMessage inputs                              = 3;
+        OutputMultiMessage outputs                            = 4;
+        IRMultiMessage irs                                    = 5;
+        SensorMessage sensor                                  = 6;
+        // DEPRECATED: SensorMultiMessage (7) --> Send as many SensorMessages as necessary
+        ListMessage list                                      = 8;
+        // DEPRECATED: ListMultiMessage (9) --> Send as many ListMessages as necessary
+        AlarmMessage alarm                                    = 10;
+        AlarmMultiMessage alarms                              = 11;
+        BurnInMultiMessage burn_ins                           = 12;
+        SensorCommandMessage sensor_command                   = 13;
+        ChangeProfileMessage change_profile                   = 14;
+        IdentifyMessage identify_message                      = 15;
+        UpdateTimeMessage update_time                         = 16;
+        ReadDeviceMessage read_device                         = 17;
+        DALIMessage dali_message                              = 18;
+        DALIQueryResponse dali_query                          = 19;
+        DMXMessage dmx_message                                = 20;
+        ExternalTriggerMessage external_trigger               = 21;
+        SpektraSettingMessage spektra_settings                = 22;
+        SpektraSequenceConfigMessage spektra_sequence         = 23;
+        SpektraCalendarMessage spektra_calendar               = 24;
+        SpektraThemeConfigMessage spektra_theme               = 25;
+        SpektraReadMessage spektra_read                       = 26;
+        SpektraControlMessage spektra_control                 = 27;
+        DMXProtocolTranslation dmx_translator                 = 28;
+        InputStateMessage  input_request                      = 29; 
+        InputStateResponse input_response                     = 30;
+        DiagnosticSystemInfoResponse diag_system              = 31;
+        DiagnosticMessage diag_message                        = 32;
+        AdminMessage admin_message                            = 33;
+        EventMessage event                                    = 34;
+        SecureDeviceSettingsMessage secure_device_settings    = 35;
+        FirmwareMetaMessage firmware_new                      = 36;
+        FirmwareControlMessage firmware_control               = 37;
+        FirmwareChunkMessage firmware_chunk                   = 38;
+        LevelCacheResponse level_cache_response               = 39;
+        // OBSOLETE: JoinedRoomsMessage joined_rooms           (40) --> No longer used
+        ExtendedListMessage list_extended                     = 41;
+        AytMessage ayt_message                                = 42;
+        RDMMessage rdm_message                                = 43;
+        RDMResponseMessage rdm_response_message               = 44;
+        LogicMultiMessage logic_message                       = 45;
+        AdminSecureLoginMessage secure_login                  = 46;
+        DeviceStateMessage device_state_message               = 47;
+        SpektraCalendarDayMessage spektra_calendar_day        = 48;
+        SpektraCalendarOverviewMessage spektra_calendar_overview    = 49;
+		DALIInputMultiMessage inputs_dali							= 50;
+		SystemLogReadMessage logs_read								= 51;
+		SystemMetaDataReadMessage metadata_read						= 52;
+        DALIAddressingMessage dali_addressing_message               = 53;
+        DALIRemappingMessage dali_remapping_message                 = 54;
+        // Deprecated: SpektraShowControlMessage spektra_show_control_message      = 55;
+        // Deprecated: SpektraShowMessage spektra_show_message                     = 56;
+        // Deprecated: ExtendedSpektraShowMessage extended_spektra_show_message    = 57;
+        RDMDiscoveryMessage rdm_discovery                           = 58;
+        RDMDiscoveryReplyMessage rdm_discovery_reply                = 59;
+        DALIIdentifyDuplicatesMessage dali_identify_duplicates      = 60;
+        SpektraLiveMessage spektra_live                             = 61;
+        SensorsQuery sensor_query                                   = 62;
+        DataAliases data_aliases                                    = 63; // Names of Profiles, Inputs, Lists, Sensors etc. (Can be GET or SET)
+        // SD Card File Operations (eDIDIO Series 10 6-Pole only)
+        SdDirListMessage sd_dir_list                                = 64;
+        SdFileReadMessage sd_file_read                              = 65;
+        SdFileWriteMessage sd_file_write                            = 66;
+        SdFileControlMessage sd_file_control                        = 67;
+        SdLogConfigMessage sd_log_config                            = 68;
+        SdLogStreamMessage sd_log_stream                            = 69 [deprecated = true]; // v1 event stream; superseded by event_stream (77). Tag 69 reserved, never reused.
+        // Crash/reset diagnostics (all hardware variants)
+        CrashLogMessage crash_log                                   = 70;
+        // Log rotation policy (eDIDIO Series 10 6-Pole only)
+        SdLogPolicyMessage sd_log_policy                            = 71;
+        // Active connection query (all hardware variants)
+        ConnectionStatusMessage connection_status                   = 72;
+        // Device provisioning - per-device PKI identity (all hardware variants)
+        ProvisionGetStateMessage provision_get_state                = 73;
+        ProvisionInstallIdentityMessage provision_install_identity  = 74;
+        ProvisionProofOfPossessionMessage provision_pop             = 75;
+        ProvisionDecommissionMessage provision_decommission         = 76;
+        // Event Stream v2 - typed live event/log stream (all hardware variants); replaces sd_log_stream (69)
+        EventStreamMessage event_stream                             = 77;
+    }
+}
