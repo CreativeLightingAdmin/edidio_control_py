@@ -211,7 +211,11 @@ class EdidioClient:
                 "Closing connection to eDIDIO device %s:%s", self._host, self._port
             )
             self._writer.close()
-            with contextlib.suppress(ConnectionResetError, asyncio.TimeoutError):
+            # A device may still be sending (keep-alive, pushes) when we close: over TLS
+            # that surfaces as SSLError APPLICATION_DATA_AFTER_CLOSE_NOTIFY. The socket is
+            # closing either way, so it is not an error for the caller.
+            with contextlib.suppress(ConnectionResetError, asyncio.TimeoutError, ssl.SSLError,
+                                     OSError):
                 await asyncio.wait_for(
                     self._writer.wait_closed(), timeout=self._timeout
                 )

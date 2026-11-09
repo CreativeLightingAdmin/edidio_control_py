@@ -158,3 +158,24 @@ def test_existing_api_surface_intact():
         EDIDIOConnectionError,
         EDIDIOTimeoutError,
     )
+
+
+def test_disconnect_ignores_tls_close_errors():
+    """A device still sending while we close gives SSLError
+    (APPLICATION_DATA_AFTER_CLOSE_NOTIFY) over TLS: disconnect must still succeed."""
+    import asyncio
+    import ssl
+
+    from edidio_control_py import EdidioClient
+
+    class Writer:
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            raise ssl.SSLError("APPLICATION_DATA_AFTER_CLOSE_NOTIFY")
+
+    client = EdidioClient("127.0.0.1", 443, use_tls=True)
+    client._writer, client._reader, client._connected = Writer(), object(), True
+    asyncio.run(client.disconnect())
+    assert not client.connected and client._writer is None
