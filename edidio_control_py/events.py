@@ -167,6 +167,24 @@ def _trigger_info(t) -> dict:
             "value": t.value, "line_mask": t.line_mask}
 
 
+NET_EVENT_NAMES = {0: "LINK_UP", 1: "LINK_DOWN", 2: "TCP_CONNECT", 3: "TCP_DISCONNECT",
+                   4: "TLS_CONNECT", 5: "TLS_DISCONNECT", 6: "KEEPALIVE_TCP",
+                   7: "KEEPALIVE_TLS", 8: "RAW_KEEPALIVE_TCP", 9: "RAW_KEEPALIVE_TLS"}
+# ConfigEvent.read_type: a ReadType, plus 17-20 for the Spektra data.
+CONFIG_WHAT = {0: "inputs", 1: "outputs", 2: "IR", 3: "sensor", 5: "list", 7: "schedules",
+               8: "burn-ins", 9: "project", 10: "network", 11: "device", 13: "list (extended)",
+               14: "logic", 15: "DALI inputs", 16: "DMX translations", 17: "Spektra sequence",
+               18: "Spektra theme", 19: "zone settings", 20: "calendar"}
+CONFIG_SOURCES = {0: "network client", 1: "BACnet", 2: "device menu", 3: "profile change",
+                  4: "firmware"}
+RESET_CAUSES = {0x01: "power-on", 0x02: "software", 0x04: "watchdog",
+                0x08: "window watchdog", 0x10: "low power", 0x20: "reset pin"}
+
+
+def _ip(b: bytes) -> str:
+    return ".".join(str(x) for x in b[:4]) if len(b) >= 4 else ""
+
+
 def parse_v2(data: bytes):
     """Parse framed body bytes into a v2 EdidioMessage (or None)."""
     msg = v2.EdidioMessage()
@@ -221,7 +239,32 @@ def decode_v2(msg) -> dict | None:
         base.update(kind="command", source=cmd.source,
                     action=_trigger_info(cmd.action), zone=cmd.zone)
     elif entry == "net":
-        base.update(kind="net", event=es.net.event)
+        n = es.net
+        base.update(kind="net", event=n.event,
+                    event_name=NET_EVENT_NAMES.get(n.event, f"NET_{n.event}"))
+        if n.ip:
+            base.update(client_ip=_ip(n.ip), client_port=n.port)
+    elif entry == "list":
+        li = es.list
+        base.update(kind="list", index=li.list_index, step=li.step_index,
+                    state=li.list_state, action=_trigger_info(li.action))
+    elif entry == "schedule":
+        sc = es.schedule
+        base.update(kind="schedule", index=sc.alarm_index, is_end=sc.is_end,
+                    action=_trigger_info(sc.action))
+    elif entry == "config":
+        c = es.config
+        base.update(kind="config", read_type=c.read_type,
+                    what=CONFIG_WHAT.get(c.read_type, f"type {c.read_type}"),
+                    item=c.item_index, source=c.source,
+                    source_name=CONFIG_SOURCES.get(c.source, f"source {c.source}"),
+                    profile=c.profile_index)
+        if c.ip:
+            base.update(client_ip=_ip(c.ip), client_port=c.port)
+    elif entry == "boot":
+        b = es.boot
+        base.update(kind="boot", reset_cause=b.reset_cause, profile=b.profile_index,
+                    causes=[n for bit, n in RESET_CAUSES.items() if b.reset_cause & bit])
     elif entry == "text":
         base.update(kind="text", text=es.text)
     else:

@@ -281,3 +281,20 @@ def test_no_loop_bound_objects_created_outside_a_loop():
 
     asyncio.run(run())
     assert d._client.calls[0][0] == "set_dali_arc_level"
+
+
+def test_decode_list_schedule_config_boot_and_net_client():
+    def es(**kw):
+        return pb2.EdidioMessage(message_id=0, event_stream=pb2.EventStreamMessage(**kw))
+    li = events.decode_v2(es(list=pb2.ListEvent(list_index=2, step_index=1, list_state=1)))
+    assert li["kind"] == "list" and li["index"] == 2 and li["step"] == 1
+    sc = events.decode_v2(es(schedule=pb2.ScheduleEvent(alarm_index=3, is_end=True)))
+    assert sc["kind"] == "schedule" and sc["index"] == 3 and sc["is_end"] is True
+    cf = events.decode_v2(es(config=pb2.ConfigEvent(read_type=17, item_index=4, source=0,
+                                               ip=bytes([192, 168, 1, 9]), port=5000)))
+    assert cf["what"] == "Spektra sequence" and cf["source_name"] == "network client"
+    assert cf["client_ip"] == "192.168.1.9" and cf["client_port"] == 5000
+    bt = events.decode_v2(es(boot=pb2.BootEvent(reset_cause=0x21, profile_index=1)))
+    assert bt["causes"] == ["power-on", "reset pin"] and bt["profile"] == 1
+    nt = events.decode_v2(es(net=pb2.NetEvent(event=4, ip=bytes([10, 0, 0, 2]), port=443)))
+    assert nt["event_name"] == "TLS_CONNECT" and nt["client_ip"] == "10.0.0.2"
